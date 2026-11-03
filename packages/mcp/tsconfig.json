@@ -2,8 +2,8 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "rootDir": ".",
-    "outDir": "../../node_modules/.tsc/cli",
-    "tsBuildInfoFile": "../../node_modules/.tsc/cli/tsbuildinfo",
+    "outDir": "../../node_modules/.tsc/mcp",
+    "tsBuildInfoFile": "../../node_modules/.tsc/mcp/tsbuildinfo",
     "types": ["node"]
   },
   "include": ["src", "test"],
