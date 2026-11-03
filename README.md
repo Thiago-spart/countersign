@@ -14,7 +14,7 @@ The agent can use it as a TypeScript SDK (`guardedAgent().safeTransfer(...)`), a
 
 ## Try it in 2 minutes
 
-Needs Node 22.22.2 or later (tested on 22.23.4 and 26.12.0), pnpm 12.16.1 and network access for the first run (the local NEAR sandbox binary is downloaded once). No Rust, NEAR account, funds or API keys: the prebuilt contracts are committed in `contracts/res/`.
+Needs Node 22.22.2 or later (`engines` in `package.json`; the `near-sandbox` npm package that runs the local chain requires it; tested on 22.23.4 and 26.12.0), pnpm 12.16.1 and network access for the first run (the local NEAR sandbox binary is downloaded once). No Rust, NEAR account, funds or API keys: the prebuilt contracts are committed in `contracts/res/`.
 
 `pnpm countersign ...` first echoes the command it runs (`$ tsx packages/cli/src/main.ts ...`); that line is left out below.
 
@@ -55,7 +55,7 @@ Needs Node 22.22.2 or later (tested on 22.23.4 and 26.12.0), pnpm 12.16.1 and ne
      - first payment to this account
    ```
 
-   Add `--json` for every signal with its status, points and data. Mainnet data comes from `free.rpc.fastnear.com` and `api.nearblocks.io`; no registry is configured on mainnet, so the registry signal reads no reports. The intents.near score depends on live data (age, transaction count, last deploy) at the time you run it.
+   Add `--json` for every signal with its status, points and data. Mainnet data comes from `free.rpc.fastnear.com` and `api.nearblocks.io`; no registry is configured on mainnet, so no reports are read and the registry signal (in `--json`) says `no registry on this network`, 0 points. The intents.near score depends on live data (age, transaction count, last deploy) at the time you run it.
 
 4. **Start a demo sandbox for the CLI and MCP steps.** In a second shell: `pnpm countersign sandbox up` →
 
@@ -249,7 +249,7 @@ pnpm typecheck            # tsc -b
 pnpm attacks              # the 7 scenarios → 7/7 PASS, exit 0
 ```
 
-Rebuilding the contracts needs rustc 1.99.1 with the `wasm32-unknown-unknown` target and cargo-near 0.22.0. Builds are byte-identical on one machine, but not across machines: `cargo near build non-reproducible-wasm` embeds the builder's cargo registry path and the rustc commit. CI (`.github/workflows/ci.yml`) therefore doesn't compare the committed wasm with its own build. It runs two jobs: a Node-only job on the committed wasm (`typecheck`, `test`, `attacks`), and a job that rebuilds the contracts from source and runs `test:contracts` and `attacks` on the fresh build.
+Rebuilding the contracts needs rustc 1.99.1 with the `wasm32-unknown-unknown` target and cargo-near 0.22.0. `scripts/build-contracts.sh` remaps the cargo home and repo paths that `cargo near build non-reproducible-wasm` would otherwise embed in panic strings. Clean builds from two checkouts at different paths on the same machine are byte-identical; a match across machines is not verified, so CI (`.github/workflows/ci.yml`) doesn't compare the committed wasm with its own build. It runs two jobs: a Node-only job on the committed wasm (`typecheck`, `test`, `attacks`), and a job that rebuilds the contracts from source and runs `test:contracts` and `attacks` on the fresh build.
 
 ## Limits
 

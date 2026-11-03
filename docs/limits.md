@@ -52,7 +52,7 @@ What it doesn't enforce:
 - **Reporter credibility is off-chain only.** The SDK weights each report by the reporter's age and activity (`min(1, age_days/30) × (tx ≥ 10 ? 1 : 0.5)`, 25 points per report, halved when the target rebutted, capped at 75). The vault counts raw reports.
 - **Rebuttals.** A target can attach one rebuttal. It halves the SDK's registry points; it doesn't move a payment out of Pending on-chain.
 - **Withdrawals.** A reporter can withdraw its report. Reports filed through a vault can't be withdrawn: the vault has no method for it.
-- **Testnet only.** The registry is deployed on testnet. On mainnet no registry is configured, so `check --network mainnet` reads no reports; the registry signal then shows `no registry reports` and scores 0.
+- **Testnet only.** The registry is deployed on testnet. On mainnet no registry is configured, so `check --network mainnet` reads no reports; the registry signal says `no registry on this network` and scores 0.
 - `first_seen` / `last_seen` in a summary are not recomputed after a partial withdrawal, and `get_reports` order changes after a withdrawal. Storage is refunded by the bytes released, so the last reporter to withdraw may get back storage another reporter paid for. See `SECURITY.md`.
 
 ## Sandbox mode uses fixture data
