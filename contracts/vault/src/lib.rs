@@ -6,7 +6,9 @@
 //! `predecessor == owner_id`, a separate account controlled by the human.
 
 pub mod events;
+pub mod ext;
 pub mod limits;
+pub mod pay;
 pub mod types;
 
 use near_sdk::json_types::U64;
@@ -14,7 +16,7 @@ use near_sdk::store::{IterableMap, LookupSet};
 use near_sdk::{AccountId, NearToken, PanicOnDefault, Promise, PromiseOrValue, env, near, require};
 
 use crate::events::VaultEvent;
-use crate::types::StorageKey;
+use crate::types::{DailyCount, StorageKey};
 pub use crate::types::{Limits, PayOutcome, PendingPayment, Spent};
 
 /// Maximum number of queued payments. The vault pays this storage itself, so
@@ -34,6 +36,8 @@ pub struct Contract {
     spent_today: Spent,
     pending: IterableMap<u64, PendingPayment>,
     next_id: u64,
+    /// Reports forwarded by `report` on `reports_today.day`.
+    reports_today: DailyCount,
 }
 
 #[near]
@@ -52,6 +56,7 @@ impl Contract {
             spent_today: Spent::default(),
             pending: IterableMap::new(StorageKey::Pending),
             next_id: 0,
+            reports_today: DailyCount::default(),
         }
     }
 
@@ -287,29 +292,5 @@ impl Contract {
             id: U64(id),
             reason,
         }
-    }
-
-    /// The single place a reserved payment is sent. `reserved_day` is the
-    /// day the amount was reserved on, for releasing it if the transfer fails.
-    ///
-    /// Task 3 replaces the body with the shared transfer path:
-    /// `transfer(...).then(on_transfer_done(id, receiver, amount, reserved_day))`,
-    /// which emits `payment_paid` / `payment_failed` and releases on failure.
-    /// Until then this is a plain detached transfer that reports `Paid`.
-    fn send_payment(
-        &mut self,
-        id: Option<U64>,
-        receiver: AccountId,
-        amount: NearToken,
-        _reserved_day: u64,
-    ) -> PromiseOrValue<PayOutcome> {
-        Promise::new(receiver.clone()).transfer(amount).detach();
-        VaultEvent::PaymentPaid {
-            id,
-            receiver: receiver.clone(),
-            amount,
-        }
-        .emit();
-        PromiseOrValue::Value(PayOutcome::Paid { receiver, amount })
     }
 }

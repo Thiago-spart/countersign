@@ -47,6 +47,9 @@ near-api = "0.8"
 cargo-near-build = "0.11.0"
 tokio = { version = "1.12.0", features = ["full"] }
 testresult = "0.4.1"
+# Raw JSON-RPC in tests/pay.rs: near-api drops the InvalidTxError details.
+reqwest = { version = "0.12", features = ["json"] }
+base64 = "0.22"
 
 # `cfg(near)` was introduced in `near-sdk` v5.27.0, and is expected cfg now
 [lints.rust.unexpected_cfgs]

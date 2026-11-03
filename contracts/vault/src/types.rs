@@ -70,6 +70,14 @@ pub struct Spent {
     pub amount: u128,
 }
 
+/// A per-UTC-day counter (`report` forwards).
+#[near(serializers = [borsh])]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DailyCount {
+    pub day: u64,
+    pub count: u32,
+}
+
 #[near(serializers = [borsh])]
 #[derive(BorshStorageKey)]
 pub enum StorageKey {

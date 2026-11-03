@@ -28,12 +28,28 @@ pub enum VaultEvent {
         receiver: AccountId,
         amount: NearToken,
     },
-    /// A transfer was sent. `id` is set for approved payments.
+    /// A transfer succeeded. `id` is set for approved payments.
     #[event_version("1.0.0")]
     PaymentPaid {
         id: Option<U64>,
         receiver: AccountId,
         amount: NearToken,
+    },
+    /// A transfer failed and its reservation was released. `id` is set for
+    /// approved payments, which are dropped from the queue (not re-queued).
+    #[event_version("1.0.0")]
+    PaymentFailed {
+        id: Option<U64>,
+        receiver: AccountId,
+        amount: NearToken,
+        reason: String,
+    },
+    /// The agent's report landed in the registry (reporter = this vault).
+    #[event_version("1.0.0")]
+    ReportForwarded {
+        target: AccountId,
+        category: String,
+        deposit: NearToken,
     },
     /// The owner denied (removed) a pending payment.
     #[event_version("1.0.0")]
