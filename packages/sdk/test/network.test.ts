@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Config } from "@countersign/core";
+import { KeyPair } from "near-api-js";
 import { checkChainId, chainIdGuard, MainnetSigningDisabledError, NetworkMismatchError, VaultClient } from "../src/index.js";
 
 describe("checkChainId", () => {
@@ -33,9 +34,9 @@ describe("VaultClient signs only after the node's chain_id matches", () => {
     nearblocksUrl: null,
     registryId: "registry.testnet",
     vaultId: "vault.x.testnet",
-    agentKey: "ed25519:REDACTED_TEST_KEY",
+    agentKey: KeyPair.fromRandom("ed25519").toString(),
     ownerId: "x.testnet",
-    ownerKey: "ed25519:REDACTED_TEST_KEY",
+    ownerKey: KeyPair.fromRandom("ed25519").toString(),
   };
   it("a 'testnet' config pointed at a mainnet node refuses every signing method before sending", async () => {
     const chainId = vi.fn(async () => "mainnet");
