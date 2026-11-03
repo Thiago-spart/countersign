@@ -1,0 +1,69 @@
+name: Agent task
+description: One PR-sized task, written so an AI coding agent can implement it from this issue alone.
+title: "Task: "
+labels: ["agent-ready"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Write this as the prompt you'd give the agent. It sees this issue, the repo and AGENTS.md, and nothing else.
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: The problem and the deliverable, in 1–3 sentences. Link the spec section (§).
+    validations:
+      required: true
+  - type: textarea
+    id: files
+    attributes:
+      label: Files
+      description: Exact paths to create, modify or test.
+      placeholder: |
+        - Create: `packages/core/src/x.ts`
+        - Test: `packages/core/test/x.test.ts`
+    validations:
+      required: true
+  - type: textarea
+    id: interfaces
+    attributes:
+      label: Interfaces
+      description: What it consumes from earlier tasks and what it must produce (exact names, signatures, types).
+      render: ts
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Named tests with their exact expected values, as a checklist.
+      placeholder: |
+        - [ ] `test_name`: input → expected output
+    validations:
+      required: true
+  - type: textarea
+    id: verify
+    attributes:
+      label: Verification
+      description: The commands to run and the output that means done.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+      description: What not to do in this task.
+  - type: input
+    id: blocked-by
+    attributes:
+      label: Blocked by
+      description: Issue numbers. Also set them as GitHub dependencies.
+      placeholder: "#3, #4"
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [contracts, core, sdk, cli, mcp, attacks, docs, infra]
+    validations:
+      required: true
