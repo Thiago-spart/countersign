@@ -8,6 +8,8 @@
 
 **Tech Stack:** Rust + near-sdk 5.x + cargo-near (contracts, from `cargo near new`), near-sandbox + near-api crates (Rust integration tests). Node ≥22, TypeScript, pnpm workspaces, near-api-js 7.x, near-sandbox (npm) 0.3.x, @modelcontextprotocol/sdk 1.x, zod 4, commander, vitest.
 
+**Tracking:** GitHub epic #1. **Task N is issue #(N+2)** (Task 0 = #2 … Task 13 = #15), with blockers set as GitHub dependencies. The issues are the to-do list; this file is the source of each task's content.
+
 **Spec:** `docs/superpowers/specs/2026-11-03-countersign-design.md`. Read it before starting. Section numbers below (§) refer to it.
 
 ## Global Constraints
