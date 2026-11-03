@@ -13,7 +13,8 @@ pub enum Category {
     Other,
 }
 
-#[near(serializers = [json, borsh])]
+/// JSON shape returned by `get_reports`. Not stored as-is: see `StoredReport`.
+#[near(serializers = [json])]
 #[derive(Clone, Debug, PartialEq)]
 pub struct Report {
     pub reporter: AccountId,
@@ -22,6 +23,30 @@ pub struct Report {
     pub note: String,
     /// Block timestamp in nanoseconds.
     pub created_at: U64,
+}
+
+/// On-chain form of a report. The reporter is the inner map key, so it is
+/// not stored again here (saves 4 + len(reporter) bytes per report, which
+/// keeps the worst case under the vault's 0.01 NEAR forward).
+#[near(serializers = [borsh])]
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredReport {
+    pub category: Category,
+    pub tx_hash: Option<String>,
+    pub note: String,
+    pub created_at: U64,
+}
+
+impl StoredReport {
+    pub fn to_report(&self, reporter: &AccountId) -> Report {
+        Report {
+            reporter: reporter.clone(),
+            category: self.category,
+            tx_hash: self.tx_hash.clone(),
+            note: self.note.clone(),
+            created_at: self.created_at,
+        }
+    }
 }
 
 #[near(serializers = [json, borsh])]

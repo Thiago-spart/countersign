@@ -2,8 +2,8 @@ use near_sdk::{AccountId, near};
 
 use crate::types::Category;
 
-/// NEP-297 events, logged as `EVENT_JSON:{"standard":"countersign_registry",...}`.
-#[near(event_json(standard = "countersign_registry"))]
+/// NEP-297 events, logged as `EVENT_JSON:{"standard":"countersign","version":"1.0.0",...}`.
+#[near(event_json(standard = "countersign"))]
 pub enum RegistryEvent {
     #[event_version("1.0.0")]
     ReportAdded {

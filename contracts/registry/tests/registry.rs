@@ -401,3 +401,32 @@ fn no_admin_methods() -> R {
     assert!(forbidden.is_empty(), "admin-like exports: {forbidden:?}");
     Ok(())
 }
+
+/// Task 3's vault forwards `report` with exactly 0.01 NEAR. The largest
+/// report (64-char reporter, 64-char implicit target, 64-byte tx_hash,
+/// 280-byte note, first report on the target) must fit in that deposit.
+#[tokio::test]
+async fn worst_case_report_fits_min_deposit() -> R {
+    let env = Env::new().await?;
+    // 56 chars + ".sandbox" = 64 chars, the maximum account id length.
+    let reporter = env.account(&"r".repeat(56)).await?;
+    assert_eq!(reporter.as_str().len(), 64);
+    let target = "b".repeat(64);
+    env.call(
+        &reporter,
+        "report",
+        json!({"target": target, "category": "impersonation",
+               "tx_hash": "h".repeat(64), "note": "n".repeat(280)}),
+        MIN,
+    )
+    .await?
+    .assert_success();
+    let page: Vec<Report> = env
+        .view(
+            "get_reports",
+            json!({"target": target, "from_index": 0, "limit": 1}),
+        )
+        .await?;
+    assert_eq!(page[0].reporter, reporter);
+    Ok(())
+}

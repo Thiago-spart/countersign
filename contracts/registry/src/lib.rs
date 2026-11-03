@@ -13,8 +13,8 @@ use near_sdk::store::{IterableMap, LookupMap};
 use near_sdk::{AccountId, NearToken, Promise, env, near, require};
 
 use crate::events::RegistryEvent;
-use crate::types::StorageKey;
 pub use crate::types::{Category, Rebuttal, Report, Summary};
+use crate::types::{StorageKey, StoredReport};
 
 /// Minimum deposit attached to `report` / `rebut` (anti-spam gate).
 pub const MIN_DEPOSIT: NearToken = NearToken::from_millinear(10);
@@ -27,8 +27,8 @@ pub const MAX_PAGE: u32 = 100;
 
 #[near(contract_state)]
 pub struct Contract {
-    /// target -> reporter -> report
-    reports: LookupMap<AccountId, IterableMap<AccountId, Report>>,
+    /// target -> reporter -> report (reporter lives only in the key)
+    reports: LookupMap<AccountId, IterableMap<AccountId, StoredReport>>,
     summaries: LookupMap<AccountId, Summary>,
     rebuttals: LookupMap<AccountId, Rebuttal>,
 }
@@ -92,8 +92,7 @@ impl Contract {
         );
         inner.insert(
             reporter.clone(),
-            Report {
-                reporter: reporter.clone(),
+            StoredReport {
                 category,
                 tx_hash,
                 note,
@@ -229,10 +228,10 @@ impl Contract {
             return vec![];
         };
         inner
-            .values()
+            .iter()
             .skip(from_index as usize)
             .take(limit.min(MAX_PAGE) as usize)
-            .cloned()
+            .map(|(reporter, r)| r.to_report(reporter))
             .collect()
     }
 
@@ -281,6 +280,8 @@ mod tests {
         assert!(used > 400, "measured only {used} bytes");
         let logs = get_logs();
         assert!(logs.iter().any(|l| l.starts_with("EVENT_JSON:")
+            && l.contains("\"standard\":\"countersign\"")
+            && l.contains("\"version\":\"1.0.0\"")
             && l.contains("\"event\":\"report_added\"")
             && l.contains("\"category\":\"drainer\"")));
 
@@ -339,5 +340,37 @@ mod tests {
             Some("h".repeat(65)),
             "x".into(),
         );
+    }
+
+    /// Worst case for the vault's 0.01 NEAR forward (Task 3): 64-char
+    /// reporter and target (implicit accounts), 64-byte tx_hash, 280-byte
+    /// note, first report on a fresh target (creates inner map + summary).
+    #[test]
+    fn worst_case_first_report_fits_min_deposit() {
+        let reporter = "a".repeat(64);
+        let target: AccountId = "b".repeat(64).parse().unwrap();
+        let mut c = Contract::default();
+        ctx(&reporter, MIN_DEPOSIT);
+        let base = env::storage_usage();
+        c.report(
+            target.clone(),
+            Category::Impersonation,
+            Some("h".repeat(64)),
+            "n".repeat(280),
+        );
+        let used = env::storage_usage() - base;
+        let cost = env::storage_byte_cost().saturating_mul(u128::from(used));
+        println!(
+            "worst-case first report: {used} bytes = {} yoctoNEAR",
+            cost.as_yoctonear()
+        );
+        assert!(cost <= MIN_DEPOSIT, "{used} bytes cost more than 0.01 NEAR");
+        assert!(
+            used <= 1000,
+            "{used} bytes leaves no headroom under 0.01 NEAR"
+        );
+        // JSON shape unchanged: reporter is still returned.
+        let r = &c.get_reports(target, 0, 1)[0];
+        assert_eq!(r.reporter.as_str(), reporter);
     }
 }
