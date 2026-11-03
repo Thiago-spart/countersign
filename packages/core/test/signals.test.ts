@@ -75,10 +75,22 @@ describe("code_change", () => {
     expect((await codeChangeSignal(T, ds, ctx(), policy)).points).toBe(0);
   });
 
-  it("a contract with no indexed deployment -> 25", async () => {
-    const ds = memSource({ accounts: { [T]: { createdAt: null, txCount: 9, isContract: true, lastDeployAt: null } } });
+  it("a non-genesis contract with no indexed deployment -> 25", async () => {
+    const ds = memSource({ accounts: { [T]: { createdAt: ago(DAY), txCount: 9, isContract: true, lastDeployAt: null } } });
     const s = await codeChangeSignal(T, ds, ctx(), policy);
     expect(s).toMatchObject({ status: "ok", points: 25, reason: "contract deployment not yet indexed" });
+  });
+
+  it("a genesis contract with no deployment record -> 0", async () => {
+    const ds = memSource({ accounts: { [T]: { createdAt: null, txCount: 9, isContract: true, lastDeployAt: null } } });
+    const s = await codeChangeSignal(T, ds, ctx(), policy);
+    expect(s).toMatchObject({ status: "ok", points: 0, reason: "genesis contract with no deployment record" });
+  });
+
+  it("a contract with no deployment record whose creation info fails -> 25 (fail closed)", async () => {
+    const base = memSource({ accounts: { [T]: { createdAt: null, txCount: 9, isContract: true, lastDeployAt: null } } });
+    const ds = { ...base, getAccountInfo: async () => Promise.reject(new IndexerLagError("lag", { source: "NearBlocks" })) };
+    expect((await codeChangeSignal(T, ds, ctx(), policy)).points).toBe(25);
   });
 
   it("not a contract -> 0", async () => {
@@ -134,15 +146,42 @@ describe("registry", () => {
     expect((await registrySignal(T, ds, ctx(), policy)).points).toBe(25);
   });
 
-  it("a reporter whose info fails -> unknown, naming the reporter; verified points in data", async () => {
+  it("1 credible reporter (25 > unknownPoints) + 1 failed lookup -> ok, partial, naming the reporter", async () => {
     const ds = memSource({
       accounts: { "r1.sandbox": credible },
       reports: { [T]: [report("r1.sandbox"), report("ghost.sandbox")] },
     });
     const s = await registrySignal(T, ds, ctx(), policy);
-    expect(s.status).toBe("unknown");
+    expect(s).toMatchObject({ status: "ok", points: 25 });
     expect(s.reason).toContain("ghost.sandbox");
-    expect(s.data).toMatchObject({ points: 25, unverifiedReporters: ["ghost.sandbox"] });
+    expect(s.data).toMatchObject({ points: 25, partial: true, unverifiedReporters: ["ghost.sandbox"] });
+  });
+
+  it("all reporter lookups fail -> unknown", async () => {
+    const ds = memSource({ reports: { [T]: [report("ghost1.sandbox"), report("ghost2.sandbox")] } });
+    const s = await registrySignal(T, ds, ctx(), policy);
+    expect(s.status).toBe("unknown");
+    expect(s.data).toMatchObject({ points: 0, partial: false });
+  });
+
+  it("3 credible reporters + 1 failed lookup -> ok, partial, 75", async () => {
+    const ds = memSource({
+      accounts: { "r1.sandbox": credible, "r2.sandbox": credible, "r3.sandbox": credible },
+      reports: { [T]: ["r1", "r2", "r3", "ghost"].map((r) => report(`${r}.sandbox`)) },
+    });
+    const s = await registrySignal(T, ds, ctx(), policy);
+    expect(s).toMatchObject({ status: "ok", points: 75, data: { partial: true, unverifiedReporters: ["ghost.sandbox"] } });
+    expect(s.reason).toContain("ghost.sandbox");
+  });
+
+  it("1 weak verified reporter (6 points) + 1 failed lookup -> unknown", async () => {
+    const ds = memSource({
+      accounts: { "r1.sandbox": { createdAt: ago(15 * DAY), txCount: 3 } },
+      reports: { [T]: [report("r1.sandbox"), report("ghost.sandbox")] },
+    });
+    const s = await registrySignal(T, ds, ctx(), policy);
+    expect(s.status).toBe("unknown");
+    expect(s.data).toMatchObject({ points: 6, partial: false });
   });
 
   it("no reports -> 0", async () => {

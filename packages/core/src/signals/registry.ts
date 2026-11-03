@@ -34,9 +34,10 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R
 
 /**
  * Registry reports, each weighted `perReport × credibility(reporter)`; ×rebuttalFactor if the target
- * rebutted; capped; rounded. If any reporter's account info can't be fetched, the signal is
- * `unknown` (fail closed); its reason names the unverified reporters and `data.points` holds the
- * points from the verified ones. Failing to read the registry itself propagates (check → unknown).
+ * rebutted; capped; rounded. If some reporters can't be verified: when at least one is verified
+ * and the verified points exceed `unknownPoints`, the signal is `ok` with those points and
+ * `data.partial = true`; otherwise it is `unknown` (`data.points` holds the verified points).
+ * Either way the reason names the unverified reporters. Failing to read the registry itself propagates (check → unknown).
  */
 export async function registrySignal(target: string, ds: DataSource, ctx: CheckContext, policy: Policy): Promise<Signal> {
   const r = policy.registry;
@@ -67,7 +68,11 @@ export async function registrySignal(target: string, ds: DataSource, ctx: CheckC
   const parts = [`reported ${reports.length} time${reports.length === 1 ? "" : "s"} in the registry (${categories}), weighted ${points}`];
   if (rebutted) parts.push(`target has rebutted (x${r.rebuttalFactor})`);
   if (unchecked.length) parts.push(`could not verify reporter${unchecked.length === 1 ? "" : "s"} ${unchecked.join(", ")}`);
-  const unknown = unchecked.length > 0;
+  // Partial failure: keep verified points when they already outweigh an unknown (never downgrade
+  // a block); otherwise the signal is unknown. check() floors a partial result at warn.
+  const verified = reporters.length - unchecked.length;
+  const partial = unchecked.length > 0 && verified > 0 && points > policy.unknownPoints;
+  const unknown = unchecked.length > 0 && !partial;
 
   return {
     id: "registry",
@@ -76,6 +81,7 @@ export async function registrySignal(target: string, ds: DataSource, ctx: CheckC
     reason: (unknown ? "registry unknown: " : "") + parts.join("; "),
     data: {
       points,
+      partial,
       unverifiedReporters: unchecked,
       reports: reports.length,
       rebutted,

@@ -60,7 +60,7 @@ function unknownSignal(id: SignalId, err: unknown, policy: Policy): Signal {
 /**
  * Gathers every signal about `target` in parallel and scores them. Fails closed: any signal whose
  * fetch rejects becomes `unknown` (+unknownPoints), so an outage yields `warn`, never `allow`.
- * If any signal besides `exists` is unknown, an `allow` is raised to `warn`.
+ * If any signal besides `exists` is unknown or partial (`data.partial`), an `allow` is raised to `warn`.
  * Trusted targets skip `policy.trustedSkips` (those signals are absent from the verdict).
  */
 export async function check(target: string, ctx: CheckContext, ds: DataSource, policy: Policy): Promise<Verdict> {
@@ -76,7 +76,9 @@ export async function check(target: string, ctx: CheckContext, ds: DataSource, p
   );
   const verdict = scoreSignals(target, signals, policy);
   // Fail closed (spec §9): missing data never yields allow.
-  if (verdict.decision === "allow" && signals.some((s) => s.id !== "exists" && s.status === "unknown")) {
+  const degraded = (s: Signal) =>
+    s.id !== "exists" && (s.status === "unknown" || (s.data as { partial?: unknown } | undefined)?.partial === true);
+  if (verdict.decision === "allow" && signals.some(degraded)) {
     return {
       ...verdict,
       decision: "warn",

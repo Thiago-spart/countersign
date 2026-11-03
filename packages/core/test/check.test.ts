@@ -113,6 +113,39 @@ describe("check", () => {
     });
   });
 
+  describe("partial registry failure", () => {
+    const credible = { createdAt: ago(40 * DAY), txCount: 20 };
+    const withGhost = (reporters: Record<string, { createdAt: Date; txCount: number }>) =>
+      memSource({
+        accounts: { "bad.sandbox": aged, ...reporters },
+        reports: { "bad.sandbox": [...Object.keys(reporters), "ghost.sandbox"].map((r) => report(r)) },
+      });
+
+    it("3 credible reporters + 1 failed lookup -> block", async () => {
+      const ds = withGhost({ "r1.sandbox": credible, "r2.sandbox": credible, "r3.sandbox": credible });
+      const v = await check("bad.sandbox", ctx(), ds, policy);
+      expect(v.score).toBe(80);
+      expect(v.decision).toBe("block");
+    });
+
+    it("1 weak verified reporter + 1 failed lookup -> unknown -> warn floor", async () => {
+      const ds = withGhost({ "r1.sandbox": { createdAt: ago(15 * DAY), txCount: 3 } });
+      const v = await check("bad.sandbox", ctx({ pastPayees: ["bad.sandbox"] }), ds, policy);
+      expect(v.signals.find((s) => s.id === "registry")?.status).toBe("unknown");
+      expect(v.decision).toBe("warn");
+      expect(v.reasons).toContain("some data sources were unavailable");
+    });
+
+    it("a partial ok registry below warn is floored at warn", async () => {
+      const ds = withGhost({ "r1.sandbox": credible });
+      const v = await check("bad.sandbox", ctx({ pastPayees: ["bad.sandbox"] }), ds, policy);
+      expect(v.signals.find((s) => s.id === "registry")).toMatchObject({ status: "ok", points: 25 });
+      expect(v.decision).toBe("warn");
+      expect(v.score).toBe(30);
+      expect(v.reasons).toContain("some data sources were unavailable");
+    });
+  });
+
   describe("scenario values", () => {
     it("a fresh lookalike -> block", async () => {
       const ds = memSource({ accounts: { "acme-c0rp.sandbox": fresh } });

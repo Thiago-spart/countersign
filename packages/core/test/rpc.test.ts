@@ -190,6 +190,15 @@ describe("live DataSource (RPC + NearBlocks)", () => {
     });
   });
 
+  it("a genesis contract (explicit null created.block_timestamp) with no deployment record -> code_change 0", async () => {
+    const { fetch } = live({
+      account: [{ account_id: "intents.near", created: { transaction_hash: null, block_timestamp: null } }],
+    });
+    const ds = createDataSource(cfg, { fetch, sleep: noSleep, cacheDir: tempCacheDir() });
+    const v = await check("intents.near", ctx({ network: "mainnet", pastPayees: ["intents.near"] }), ds, policy);
+    expect(v.signals.find((s) => s.id === "code_change")).toMatchObject({ status: "ok", points: 0 });
+  });
+
   it("NearBlocks-only outage (RPC healthy) never allows", async () => {
     const { fetch } = stubFetch((url, init) => (url === RPC ? recordedRpc(url, init) : { status: 429 }));
     const ds = createDataSource(cfg, { fetch, sleep: noSleep, cacheDir: tempCacheDir() });
