@@ -12,6 +12,7 @@
     "test": "vitest run --passWithNoTests",
     "test:contracts": "bash scripts/test-contracts.sh",
     "attacks": "tsx attacks/src/run.ts",
+    "countersign": "tsx packages/cli/src/main.ts",
     "typecheck": "tsc -b",
     "smoke": "tsx scripts/smoke-sandbox.ts"
   },

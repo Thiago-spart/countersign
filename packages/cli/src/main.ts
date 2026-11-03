@@ -55,7 +55,7 @@ program.command("unpause").description("unpause the vault (owner key)").action(a
 program
   .command("report <account>")
   .description("report a bad account to the registry")
-  .requiredOption("--category <category>", "e.g. scam, phishing, lookalike")
+  .requiredOption("--category <category>", "scam | phishing | drainer | impersonation | other")
   .requiredOption("--note <text>", "what happened")
   .option("--tx <hash>", "related transaction hash")
   .action(action(reportCommand));
