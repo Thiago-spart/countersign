@@ -1,6 +1,6 @@
 import { ConfigError, type Config } from "@countersign/core";
 import { Account, JsonRpcProvider, KeyPair, actions, type KeyPairString } from "near-api-js";
-import { MainnetSigningDisabledError } from "./errors.js";
+import { chainIdGuard } from "./network.js";
 
 const TGAS = 10n ** 12n;
 /** The vault requires ≥ 40 TGas for `pay` and ≥ 35 TGas for `report`; 50 leaves headroom for the chain. */
@@ -87,34 +87,40 @@ export function parseOutcome(value: unknown, method: string): PayOutcome {
 /**
  * Talks to one vault. Agent methods sign with the agent's function-call key (signer = the vault);
  * owner methods sign as `ownerId` with the owner's full-access key. Every signing method throws
- * MainnetSigningDisabledError on mainnet before building a transaction.
+ * MainnetSigningDisabledError on mainnet (by label, or when the node's chain_id is mainnet) and
+ * NetworkMismatchError when the chain_id doesn't match, before building a transaction.
  */
 export class VaultClient {
   readonly vaultId: string;
   private readonly provider: JsonRpcProvider;
 
-  constructor(private readonly cfg: Config) {
+  private readonly guard: (what: string) => Promise<void>;
+
+  /** `opts.chainId` replaces the RPC `status` lookup (tests). */
+  constructor(
+    private readonly cfg: Config,
+    opts: { chainId?: () => Promise<string> } = {},
+  ) {
     if (!cfg.vaultId) throw new ConfigError("COUNTERSIGN_VAULT_ID is not set (the vault account)", "COUNTERSIGN_VAULT_ID");
     this.vaultId = cfg.vaultId;
     this.provider = new JsonRpcProvider({ url: cfg.rpcUrl });
+    // Before the first signature, the node's chain_id must match the configured network and must
+    // never be mainnet (the label alone could be wrong, e.g. a mainnet RPC URL under "testnet").
+    this.guard = chainIdGuard(cfg.network, opts.chainId ?? (async () => (await this.provider.viewNodeStatus()).chain_id));
   }
 
   // ------------------------------------------------------------ signing
 
-  private guard(what: string): void {
-    if (this.cfg.network === "mainnet") throw new MainnetSigningDisabledError(what);
-  }
-
-  private agent(what: string): Account {
-    this.guard(what);
+  private async agent(what: string): Promise<Account> {
+    await this.guard(what);
     if (!this.cfg.agentKey) {
       throw new ConfigError("COUNTERSIGN_AGENT_KEY is not set (the agent's function-call key)", "COUNTERSIGN_AGENT_KEY");
     }
     return new Account(this.vaultId, this.provider, this.cfg.agentKey as KeyPairString);
   }
 
-  private owner(what: string): Account {
-    this.guard(what);
+  private async owner(what: string): Promise<Account> {
+    await this.guard(what);
     if (!this.cfg.ownerId) throw new ConfigError("COUNTERSIGN_OWNER_ID is not set (the vault owner)", "COUNTERSIGN_OWNER_ID");
     if (!this.cfg.ownerKey) {
       throw new ConfigError("COUNTERSIGN_OWNER_KEY is not set (the owner's full-access key)", "COUNTERSIGN_OWNER_KEY");
@@ -164,18 +170,18 @@ export class VaultClient {
   // ------------------------------------------------------------ agent
 
   async pay(receiver: string, amountYocto: bigint, memo: string): Promise<VaultCallResult<PayOutcome>> {
-    const agent = this.agent("pay");
+    const agent = await this.agent("pay");
     return this.payCall(agent, "pay", { receiver, amount: amountYocto.toString(), memo }, AGENT_GAS);
   }
 
   async requestApproval(receiver: string, amountYocto: bigint, memo: string, reason: string): Promise<VaultCallResult<PayOutcome>> {
-    const agent = this.agent("request_approval");
+    const agent = await this.agent("request_approval");
     return this.payCall(agent, "request_approval", { receiver, amount: amountYocto.toString(), memo, reason }, DEFAULT_GAS);
   }
 
   /** Forward a report to the registry. Throws if the vault refuses it or the registry does not record it. */
   async report(target: string, category: string, note: string, txHash?: string): Promise<{ txHash: string }> {
-    const agent = this.agent("report");
+    const agent = await this.agent("report");
     const res = await this.mustCall(agent, "report", { target, category, tx_hash: txHash ?? null, note }, AGENT_GAS);
     if (res.value !== true) throw new Error(`registry refused the report (tx ${res.txHash})`);
     return { txHash: res.txHash };
@@ -184,22 +190,22 @@ export class VaultClient {
   // ------------------------------------------------------------ owner
 
   async approve(id: string): Promise<VaultCallResult<PayOutcome>> {
-    const owner = this.owner("approve");
+    const owner = await this.owner("approve");
     return this.payCall(owner, "approve", { id }, APPROVE_GAS, ONE_YOCTO);
   }
 
   async deny(id: string): Promise<{ txHash: string }> {
-    const { txHash } = await this.mustCall(this.owner("deny"), "deny", { id });
+    const { txHash } = await this.mustCall(await this.owner("deny"), "deny", { id });
     return { txHash };
   }
 
   async pause(): Promise<{ txHash: string }> {
-    const { txHash } = await this.mustCall(this.owner("pause"), "pause", {});
+    const { txHash } = await this.mustCall(await this.owner("pause"), "pause", {});
     return { txHash };
   }
 
   async unpause(): Promise<{ txHash: string }> {
-    const { txHash } = await this.mustCall(this.owner("unpause"), "unpause", {}, DEFAULT_GAS, ONE_YOCTO);
+    const { txHash } = await this.mustCall(await this.owner("unpause"), "unpause", {}, DEFAULT_GAS, ONE_YOCTO);
     return { txHash };
   }
 

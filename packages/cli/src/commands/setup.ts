@@ -10,6 +10,9 @@ import {
   parseNearAmount,
   redactSecrets,
   vaultProvisionActions,
+  AGENT_ALLOWANCE,
+  AGENT_METHODS,
+  checkChainId,
 } from "@countersign/sdk";
 import { Account, JsonRpcProvider, KeyPair, type KeyPairString } from "near-api-js";
 import { NEAR } from "near-api-js/tokens";
@@ -80,6 +83,9 @@ export async function runSetup(opts: SetupOpts): Promise<SetupResult> {
 
   const vaultId = `vault.${opts.ownerId}`;
   const provider = new JsonRpcProvider({ url: opts.rpcUrl });
+  // The network label alone isn't enough: refuse unless the node itself is on that network
+  // (never mainnet), before any prompt, file or transaction.
+  checkChainId(opts.network, (await provider.viewNodeStatus()).chain_id, "setup");
   const owner = new Account(opts.ownerId, provider, opts.ownerKey as KeyPairString);
   const wasm = readFileSync(opts.wasmPath ?? VAULT_WASM);
   const secrets = [opts.ownerKey];
@@ -169,9 +175,9 @@ export async function runSetup(opts: SetupOpts): Promise<SetupResult> {
 
   // Verify after the key is safely on disk: if this throws, .env and the recovery file are both kept.
   const keys = (await provider.viewAccessKeyList({ accountId: vaultId })).keys;
-  const full = keys.filter((k) => (k.access_key.permission as unknown) === "FullAccess");
-  if (keys.length !== 1 || full.length > 0) {
-    throw new Error(`unexpected access keys on ${vaultId} after setup; ${envPath} and ${recoveryPath} were kept`);
+  const problem = verifyVaultKeys(keys as unknown as AccessKeyEntry[], vaultId, agentKey.getPublicKey().toString());
+  if (problem) {
+    throw new Error(`unexpected access keys on ${vaultId} after setup (${problem}); ${envPath} and ${recoveryPath} were kept`);
   }
   rmSync(recoveryPath, { force: true });
   out("Keep COUNTERSIGN_OWNER_KEY (your full-access key) in your own shell or keychain for approve / deny / pause.");
@@ -202,4 +208,38 @@ export async function setupCommand(opts: {
     envPath: opts.envFile,
   });
   console.log(`Done. Vault ${res.vaultId}; run \`countersign status\` to check it.`);
+}
+
+/** One entry of RPC `view_access_key_list`. */
+export interface AccessKeyEntry {
+  public_key: string;
+  access_key: {
+    nonce: number;
+    permission: "FullAccess" | { FunctionCall: { allowance: string | null; receiver_id: string; method_names: string[] } };
+  };
+}
+
+/**
+ * Setup's post-batch check. The vault must hold exactly one key: the agent's function-call key
+ * (`agentPublicKey`), with receiver = the vault, method names exactly AGENT_METHODS (any order;
+ * an empty list would allow every method) and allowance AGENT_ALLOWANCE. Returns null when that
+ * holds, else what is wrong.
+ */
+export function verifyVaultKeys(keys: AccessKeyEntry[], vaultId: string, agentPublicKey: string): string | null {
+  if (keys.length !== 1) return `${keys.length} keys, expected exactly 1`;
+  const [key] = keys;
+  if (key!.public_key !== agentPublicKey) return "the key is not the agent key";
+  const perm = key!.access_key.permission;
+  if (typeof perm !== "object" || !("FunctionCall" in perm)) return "the key is a full-access key";
+  const fc = perm.FunctionCall;
+  if (fc.receiver_id !== vaultId) return `receiver is ${fc.receiver_id}, expected ${vaultId}`;
+  const methods = [...fc.method_names].sort();
+  const want = [...AGENT_METHODS].sort();
+  if (methods.length !== want.length || methods.some((m, i) => m !== want[i])) {
+    return `methods are [${fc.method_names.join(", ")}], expected [${AGENT_METHODS.join(", ")}]`;
+  }
+  if (fc.allowance === null || BigInt(fc.allowance) !== BigInt(AGENT_ALLOWANCE)) {
+    return `allowance is ${fc.allowance ?? "unlimited"}, expected ${AGENT_ALLOWANCE}`;
+  }
+  return null;
 }

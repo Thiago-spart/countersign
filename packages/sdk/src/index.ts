@@ -16,4 +16,5 @@ export {
   redactSecrets,
   redactError,
 } from "./errors.js";
+export { checkChainId, chainIdGuard, NetworkMismatchError } from "./network.js";
 export { vaultProvisionActions, AGENT_METHODS, AGENT_ALLOWANCE, type ProvisionOpts } from "./provision.js";

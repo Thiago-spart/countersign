@@ -69,6 +69,10 @@ describe("format", () => {
     const low = formatAllowance(4n * 10n ** 22n);
     expect(low.text).toBe("0.04 NEAR");
     expect(low.warning).toMatch(/allowance/i);
+    // The vault has no full-access key, so no new key can be added: withdraw and set up a new vault.
+    expect(low.warning).toMatch(/withdraw/);
+    expect(low.warning).toMatch(/new vault/);
+    expect(low.warning).not.toMatch(/add a new key/);
   });
   it("free balance: warns below 0.06 NEAR", () => {
     expect(formatFreeBalance(10n ** 24n).warning).toBeUndefined();
@@ -230,6 +234,18 @@ describe("countersign setup (against the sandbox)", { timeout: 90_000 }, () => {
     const c = { ...env.config, vaultId: res.vaultId, agentKey: vars.COUNTERSIGN_AGENT_KEY, ownerId, ownerKey };
     expect(await new VaultClient(c).keyAllowance()).toBe(AGENT_ALLOWANCE);
     expect(await new VaultClient(c).isPaused()).toBe(false);
+  });
+
+  it("refuses when the RPC node's chain_id doesn't match the network, before any prompt or transaction", async () => {
+    const { ownerId, base } = await setupEnv();
+    const prompts: string[] = [];
+    // A "testnet" setup pointed at the sandbox node (chain_id is not "testnet").
+    await expect(runSetup({ ...base, network: "testnet", confirm: async (q) => (prompts.push(q), true) })).rejects.toThrow(
+      /chain_id/,
+    );
+    expect(prompts).toEqual([]);
+    await expect(env.provider.viewAccount({ accountId: `vault.${ownerId}` })).rejects.toThrow();
+    expect(existsSync(base.recoveryDir)).toBe(false);
   });
 
   it("refuses --fund below 3 NEAR before sending anything", async () => {

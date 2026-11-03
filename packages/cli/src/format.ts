@@ -19,7 +19,7 @@ export function formatAllowance(allowance: bigint | null): Line {
   if (allowance === null) return { text: "unlimited" };
   const text = `${formatNear(allowance)} NEAR`;
   if (allowance < ALLOWANCE_WARN_BELOW) {
-    return { text, warning: "agent key allowance is below 20% of 1 NEAR; add a new key before it runs out" };
+    return { text, warning: "agent key allowance is below 20% of 1 NEAR; when it runs out the agent can't send. The vault has no full-access key to add another, so withdraw the funds and set up a new vault" };
   }
   return { text };
 }

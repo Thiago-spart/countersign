@@ -1,9 +1,28 @@
 import { ConfigError, loadConfig, type Config } from "@countersign/core";
 import { redactError } from "@countersign/sdk";
 
-/** Config from COUNTERSIGN_* variables; `--network` overrides COUNTERSIGN_NETWORK. */
+/** Variables that belong to one network; dropped when `--network` names a different one. */
+const NETWORK_SPECIFIC = [
+  "COUNTERSIGN_RPC_URL",
+  "COUNTERSIGN_REGISTRY_ID",
+  "COUNTERSIGN_VAULT_ID",
+  "COUNTERSIGN_AGENT_KEY",
+  "COUNTERSIGN_OWNER_ID",
+  "COUNTERSIGN_OWNER_KEY",
+] as const;
+
+/**
+ * Config from COUNTERSIGN_* variables; `--network` overrides COUNTERSIGN_NETWORK. When it names a
+ * different network than the env, the env's RPC, registry, vault and keys are dropped, so
+ * `check x --network mainnet` with a testnet .env uses the mainnet defaults, not testnet endpoints.
+ */
 export function cliConfig(network?: string): Config {
-  return loadConfig(network ? { ...process.env, COUNTERSIGN_NETWORK: network } : process.env);
+  if (!network) return loadConfig(process.env);
+  const env: NodeJS.ProcessEnv = { ...process.env, COUNTERSIGN_NETWORK: network };
+  if (process.env.COUNTERSIGN_NETWORK?.trim() !== network) {
+    for (const v of NETWORK_SPECIFIC) delete env[v];
+  }
+  return loadConfig(env);
 }
 
 export function receiptsPath(): string | undefined {
