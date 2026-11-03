@@ -12,7 +12,7 @@ pub mod pay;
 pub mod types;
 
 use near_sdk::json_types::U64;
-use near_sdk::store::{IterableMap, LookupSet};
+use near_sdk::store::{IterableMap, IterableSet};
 use near_sdk::{AccountId, NearToken, PanicOnDefault, Promise, PromiseOrValue, env, near, require};
 
 use crate::events::VaultEvent;
@@ -38,7 +38,9 @@ pub struct Contract {
     registry_id: AccountId,
     limits: Limits,
     paused: bool,
-    trusted: LookupSet<AccountId>,
+    /// Iterable (not a LookupSet) so `get_trusted` can list it; the SDK
+    /// feeds the list into `check()` as `CheckContext.trusted`.
+    trusted: IterableSet<AccountId>,
     spent_today: Spent,
     pending: IterableMap<u64, PendingPayment>,
     next_id: u64,
@@ -58,7 +60,7 @@ impl Contract {
             registry_id,
             limits: limits.unwrap_or_default(),
             paused: false,
-            trusted: LookupSet::new(StorageKey::Trusted),
+            trusted: IterableSet::new(StorageKey::Trusted),
             spent_today: Spent::default(),
             pending: IterableMap::new(StorageKey::Pending),
             next_id: 0,
@@ -209,6 +211,11 @@ impl Contract {
         } else {
             NearToken::from_yoctonear(0)
         }
+    }
+
+    /// Every trusted receiver (unordered).
+    pub fn get_trusted(&self) -> Vec<AccountId> {
+        self.trusted.iter().cloned().collect()
     }
 
     pub fn is_trusted(&self, account_id: AccountId) -> bool {

@@ -428,3 +428,27 @@ async fn memo_and_reason_capped_at_280_bytes() -> R {
     assert_eq!((pending[0].memo.len(), pending[0].reason.len()), (280, 280));
     Ok(())
 }
+
+#[tokio::test]
+async fn get_trusted_lists_trusted_accounts() -> R {
+    let env = Env::new().await?;
+    let bob = env.account("bob").await?;
+    let carol = env.account("carol").await?;
+    assert!(env.view::<Vec<String>>("get_trusted", json!({})).await?.is_empty());
+    for a in [&bob, &carol] {
+        env.owner_call("trust", json!({"account_id": a}))
+            .await?
+            .assert_success();
+    }
+    let mut trusted: Vec<String> = env.view("get_trusted", json!({})).await?;
+    trusted.sort();
+    let mut want = vec![bob.to_string(), carol.to_string()];
+    want.sort();
+    assert_eq!(trusted, want);
+    env.owner_call("untrust", json!({"account_id": bob}))
+        .await?
+        .assert_success();
+    let trusted: Vec<String> = env.view("get_trusted", json!({})).await?;
+    assert_eq!(trusted, vec![carol.to_string()]);
+    Ok(())
+}
