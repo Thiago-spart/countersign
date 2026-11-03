@@ -1,3 +1,4 @@
+import { inspect } from "node:util";
 import { describe, expect, it } from "vitest";
 import { truncateBytes } from "../src/agent.js";
 import { parseOutcome } from "../src/vaultClient.js";
@@ -20,14 +21,30 @@ describe("redactSecrets / redactError", () => {
     expect(out).toContain("[redacted]");
   });
 
-  it("redactError keeps the name, redacts message and stack, keeps the original as cause", () => {
+  it("redactError keeps the name, redacts message and stack, keeps a redacted copy of the original as cause", () => {
     const orig = new TypeError(`bad ${configured} and ${otherSecret}`);
     const e = redactError(orig, [configured]);
     expect(e.name).toBe("TypeError");
     expect(e.message).not.toContain(body);
     expect(e.message).not.toContain(otherSecret.slice(8));
     expect(e.stack?.split("\n")[0]).not.toContain(body);
-    expect(e.cause).toBe(orig);
+    expect(e.cause).not.toBe(orig);
+    expect((e.cause as Error).message).toBe(e.message);
+  });
+
+  it("redacts the whole cause chain and caps its depth", () => {
+    let err: Error = new Error(`root ${otherSecret}`);
+    for (let i = 0; i < 8; i++) err = new Error(`level ${i} ${configured}`, { cause: err });
+    const e = redactError(err, [configured]);
+    const text = inspect(e, { depth: 20 });
+    expect(text).not.toContain(body);
+    expect(text).not.toContain(otherSecret.slice(8));
+    let depth = 0;
+    for (let c: unknown = e.cause; c !== undefined; c = (c as Error).cause) {
+      expect(c).toBeInstanceOf(Error);
+      depth++;
+    }
+    expect(depth).toBe(5);
   });
 });
 

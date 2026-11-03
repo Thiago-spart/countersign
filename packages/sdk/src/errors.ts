@@ -43,14 +43,31 @@ export function redactSecrets(text: string, secrets: readonly (string | undefine
   return out;
 }
 
+/** How many `cause` links redactError follows; deeper causes are dropped. */
+const MAX_CAUSE_DEPTH = 5;
+
+/** A redacted copy of `err` and its cause chain, `depth` links deep so far. */
+function redactedCopy(err: unknown, secrets: readonly (string | undefined)[], depth: number): Error {
+  const isErr = err instanceof Error;
+  const name = isErr ? err.name : "Error";
+  const message = redactSecrets(isErr ? err.message : String(err), secrets);
+  const raw = isErr ? err.cause : undefined;
+  const cause = raw !== undefined && depth < MAX_CAUSE_DEPTH ? redactedCopy(raw, secrets, depth + 1) : undefined;
+  const copy = cause === undefined ? new Error(message) : new Error(message, { cause });
+  copy.name = name;
+  copy.stack = isErr && err.stack ? redactSecrets(err.stack, secrets) : `${name}: ${message}`;
+  return copy;
+}
+
 /**
- * A copy of `err` safe to print: same name, redacted message (and so a redacted stack header),
- * original kept as `cause`.
+ * A copy of `err` safe to print: same name, redacted message and stack. Its `cause` is a redacted
+ * copy of `err` (and of its cause chain, at most MAX_CAUSE_DEPTH links), never the raw original,
+ * so `console.error(err)` / `util.inspect(err)` can't print a key. Other properties are not copied.
  */
 export function redactError(err: unknown, secrets: readonly (string | undefined)[] = []): Error {
   const name = err instanceof Error ? err.name : "Error";
   const message = redactSecrets(err instanceof Error ? err.message : String(err), secrets);
-  const safe = new Error(message, { cause: err });
+  const safe = new Error(message, { cause: redactedCopy(err, secrets, 1) });
   safe.name = name;
   safe.stack = `${name}: ${message}\n${(safe.stack ?? "").split("\n").slice(1).join("\n")}`;
   return safe;

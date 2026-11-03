@@ -1,6 +1,7 @@
 import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { inspect } from "node:util";
 import { ConfigError, type DataSource } from "@countersign/core";
 import { KeyPair } from "near-api-js";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -215,7 +216,10 @@ describe("guardedAgent in the sandbox", { timeout: 30_000 }, () => {
         expect(text).not.toContain(body(stray.toString()));
         expect(text).toContain(stray.getPublicKey().toString());
       }
-      expect(thrown.cause).toBe(err);
+      expect(thrown.cause).not.toBe(err);
+      const dumped = inspect(thrown, { depth: 10 });
+      expect(dumped).not.toContain(body(env.config.agentKey!));
+      expect(dumped).not.toContain(body(stray.toString()));
     });
 
     it("a receipt write failure doesn't mask the send error", async () => {
