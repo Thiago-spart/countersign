@@ -25,6 +25,12 @@ pub const MAX_PENDING: u32 = 50;
 /// Maximum `memo` / `reason` length in bytes for queued payments.
 pub const MAX_TEXT_BYTES: usize = 280;
 
+/// Balance not locked for the account's storage stake.
+pub(crate) fn available_balance() -> NearToken {
+    let storage_stake = env::storage_byte_cost().saturating_mul(u128::from(env::storage_usage()));
+    env::account_balance().saturating_sub(storage_stake)
+}
+
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct Contract {
@@ -256,7 +262,8 @@ impl Contract {
         }
     }
 
-    /// Add a payment to the pending queue, or reject it if the queue is full.
+    /// Add a payment to the pending queue, or reject it if the queue is full
+    /// or the vault can't stake the entry's storage ("insufficient balance").
     /// Never panics, so `pay`'s callback (Task 3) can use it too.
     fn enqueue(
         &mut self,
@@ -281,6 +288,18 @@ impl Contract {
                 created_at: U64(env::block_timestamp()),
             },
         );
+        // Measure the new entry's storage now; if the balance can't stake it
+        // the receipt would fail at the end (and roll back the caller's
+        // release), so undo the insert and reject instead.
+        self.pending.flush();
+        if env::account_balance()
+            < env::storage_byte_cost().saturating_mul(u128::from(env::storage_usage()))
+        {
+            self.pending.remove(&id);
+            self.pending.flush();
+            self.next_id = id;
+            return self.reject(None, receiver, amount, "insufficient balance");
+        }
         VaultEvent::PaymentPending {
             id: U64(id),
             receiver,

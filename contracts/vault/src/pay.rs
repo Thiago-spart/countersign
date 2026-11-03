@@ -7,12 +7,13 @@
 use near_sdk::json_types::U64;
 use near_sdk::{
     AccountId, Gas, NearToken, Promise, PromiseError, PromiseOrValue, env, near, require,
+    serde_json,
 };
 
 use crate::events::VaultEvent;
 use crate::ext::{CATEGORIES, Summary, ext_registry};
 use crate::types::DailyCount;
-use crate::{Contract, ContractExt, MAX_TEXT_BYTES, PayOutcome, limits};
+use crate::{Contract, ContractExt, MAX_TEXT_BYTES, PayOutcome, available_balance, limits};
 
 /// Static gas for the registry's `get_summary` view (a single map read).
 pub const GAS_GET_SUMMARY: Gas = Gas::from_tgas(5);
@@ -24,7 +25,17 @@ pub const GAS_ON_TRANSFER_DONE: Gas = Gas::from_tgas(10);
 /// Static gas for the registry's `report` (storage writes + a refund transfer).
 pub const GAS_REGISTRY_REPORT: Gas = Gas::from_tgas(15);
 /// Static gas for `on_report_done`.
-pub const GAS_ON_REPORT_DONE: Gas = Gas::from_tgas(5);
+pub const GAS_ON_REPORT_DONE: Gas = Gas::from_tgas(10);
+
+/// Least prepaid gas `pay` accepts: the callbacks' static gas (5 + 25) plus
+/// 10 TGas for `pay`'s own execution (measured: a whole paid `pay` burns
+/// ~8.4 TGas across all its receipts). Below this a callback could run out
+/// of gas and strand the reservation. The SDK attaches 50 TGas.
+pub const MIN_PAY_GAS: Gas = Gas::from_tgas(40);
+/// Least prepaid gas `report` accepts: 15 + 10 static plus 10 for itself.
+pub const MIN_REPORT_GAS: Gas = Gas::from_tgas(35);
+/// Largest `get_summary` response read (the real one is ~100 bytes).
+pub const MAX_SUMMARY_BYTES: usize = 1024;
 
 /// Deposit forwarded with each report (the registry's minimum; it keeps the
 /// measured storage cost and refunds the rest to the vault).
@@ -35,6 +46,12 @@ pub const MAX_REPORTS_PER_DAY: u32 = 5;
 pub const MAX_TX_HASH_BYTES: usize = 64;
 
 pub const TRANSFER_FAILED: &str = "transfer failed";
+pub const INSUFFICIENT_BALANCE: &str = "insufficient balance";
+
+/// Parse a `get_summary` response; `None` if it is not a registry summary.
+pub fn parse_summary(bytes: &[u8]) -> Option<Summary> {
+    serde_json::from_slice(bytes).ok()
+}
 
 #[near]
 impl Contract {
@@ -49,6 +66,7 @@ impl Contract {
         memo: String,
     ) -> PromiseOrValue<PayOutcome> {
         self.require_self();
+        require!(env::prepaid_gas() >= MIN_PAY_GAS, "not enough gas");
         // Checked before reserving: the callback may queue the memo and must
         // not panic.
         require!(memo.len() <= MAX_TEXT_BYTES, "memo exceeds 280 bytes");
@@ -57,6 +75,14 @@ impl Contract {
         }
         if amount > self.limits.per_tx {
             return PromiseOrValue::Value(self.reject(None, receiver, amount, "over per-tx cap"));
+        }
+        if amount > available_balance() {
+            return PromiseOrValue::Value(self.reject(
+                None,
+                receiver,
+                amount,
+                INSUFFICIENT_BALANCE,
+            ));
         }
         let now = env::block_timestamp();
         if let Err(reason) = limits::reserve(
@@ -90,6 +116,8 @@ impl Contract {
         note: String,
     ) -> Promise {
         self.require_self();
+        require!(env::prepaid_gas() >= MIN_REPORT_GAS, "not enough gas");
+        require!(!self.paused, "paused");
         require!(CATEGORIES.contains(&category.as_str()), "invalid category");
         require!(note.len() <= MAX_TEXT_BYTES, "note exceeds 280 bytes");
         if let Some(h) = &tx_hash {
@@ -135,9 +163,17 @@ impl Contract {
         amount: NearToken,
         memo: String,
         reserved_day: u64,
-        #[callback_result] r: Result<Summary, PromiseError>,
     ) -> PromiseOrValue<PayOutcome> {
-        let Ok(summary) = r else {
+        // Read the result by hand: `#[callback_result]` would panic on a
+        // malformed response, stranding the reservation.
+        let summary = if env::promise_results_count() == 1 {
+            env::promise_result_checked(0, MAX_SUMMARY_BYTES)
+                .ok()
+                .and_then(|b| parse_summary(&b))
+        } else {
+            None
+        };
+        let Some(summary) = summary else {
             self.release(reserved_day, amount);
             return PromiseOrValue::Value(self.reject(
                 None,
@@ -163,6 +199,18 @@ impl Contract {
                 amount,
                 memo,
                 "unknown payee".to_string(),
+            ));
+        }
+        // The balance can drop between `pay` and here (gas, other payments);
+        // a transfer the vault can't afford would panic and strand the
+        // reservation.
+        if amount > available_balance() {
+            self.release(reserved_day, amount);
+            return PromiseOrValue::Value(self.reject(
+                None,
+                receiver,
+                amount,
+                INSUFFICIENT_BALANCE,
             ));
         }
         self.send_payment(None, receiver, amount, reserved_day)
@@ -250,5 +298,74 @@ impl Contract {
                     .on_transfer_done(id, receiver, amount, reserved_day),
             )
             .into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Limits;
+    use near_sdk::test_utils::{VMContextBuilder, get_logs};
+    use near_sdk::{PromiseResult, testing_env};
+
+    fn vault() -> AccountId {
+        "vault.near".parse().unwrap()
+    }
+
+    #[test]
+    fn parse_summary_accepts_registry_shape_only() {
+        let ok = br#"{"reports":2,"first_seen":"1","last_seen":"2","rebutted":true}"#;
+        assert_eq!(parse_summary(ok).map(|s| s.reports), Some(2));
+        for bad in [
+            &b""[..],
+            b"null",
+            b"42",
+            br#"{"reports":"two"}"#,
+            br#"["x"]"#,
+            b"\xff",
+        ] {
+            assert!(parse_summary(bad).is_none(), "{bad:?}");
+        }
+    }
+
+    /// A malformed registry response is treated like a failed call:
+    /// released + `Rejected("registry unavailable")`, no panic.
+    #[test]
+    fn malformed_summary_rejects_and_releases() {
+        let ctx = VMContextBuilder::new()
+            .current_account_id(vault())
+            .predecessor_account_id(vault())
+            .account_balance(NearToken::from_near(10))
+            .block_timestamp(1_000)
+            .build();
+        testing_env!(ctx.clone());
+        let mut c = Contract::new(
+            "owner.near".parse().unwrap(),
+            "registry.near".parse().unwrap(),
+            Some(Limits::default()),
+        );
+        let amount = NearToken::from_millinear(100);
+        limits::reserve(&mut c.spent_today, 1_000, amount.as_yoctonear(), u128::MAX).unwrap();
+        assert_eq!(c.get_spent_today(), amount);
+
+        testing_env!(
+            ctx,
+            near_sdk::test_vm_config(),
+            near_sdk::RuntimeFeesConfig::test(),
+            Default::default(),
+            vec![PromiseResult::Successful(b"\"not a summary\"".to_vec())],
+        );
+        let out = c.on_registry_summary("bob.near".parse().unwrap(), amount, "m".into(), 0);
+        let PromiseOrValue::Value(out) = out else {
+            panic!("expected a value")
+        };
+        assert_eq!(
+            out,
+            PayOutcome::Rejected {
+                reason: "registry unavailable".into()
+            }
+        );
+        assert_eq!(c.get_spent_today(), NearToken::from_yoctonear(0));
+        assert!(get_logs().iter().any(|l| l.contains("payment_rejected")));
     }
 }

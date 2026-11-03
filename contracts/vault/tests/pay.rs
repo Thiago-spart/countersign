@@ -510,3 +510,125 @@ async fn report_failure_releases_deposit_and_bad_category_fails_fast() -> R {
     assert!(lost < MILLI(5), "vault lost {lost}");
     Ok(())
 }
+
+// ------------------------------------------------------------ fix round 1
+
+impl Env {
+    async fn pay_with_gas(
+        &self,
+        receiver: &AccountId,
+        amount: NearToken,
+        gas: NearGas,
+    ) -> R<TxResult> {
+        Ok(self
+            .contract
+            .call_function(
+                "pay",
+                json!({"receiver": receiver, "amount": amount, "memo": "invoice 7"}),
+            )
+            .transaction()
+            .gas(gas)
+            .with_signer(self.vault.clone(), self.agent.clone())
+            .send_to(&self.net)
+            .await?)
+    }
+
+    /// Vault balance not locked for storage (same formula as the contract).
+    async fn vault_available(&self) -> R<NearToken> {
+        let a = near_api::Account(self.vault.clone())
+            .view()
+            .fetch_from(&self.net)
+            .await?
+            .data;
+        let stake = NearToken::from_yoctonear(10u128.pow(19) * u128::from(a.storage_usage));
+        Ok(a.amount.saturating_sub(stake))
+    }
+}
+
+/// A vault drained to just above its storage stake rejects instead of
+/// panicking (which would strand the reservation until UTC rollover).
+#[tokio::test]
+async fn pay_insufficient_balance_rejected() -> R {
+    let env = Env::with_registry(Registry::Deployed).await?;
+    let bob = env.account("bob").await?;
+    env.trust(&bob).await?;
+    // The agent signs as the vault, so the vault must still be able to
+    // prepay 50 TGas above its storage stake (~0.051 NEAR in the sandbox,
+    // else the tx is refused with LackBalanceForState).
+    let keep = MILLI(90);
+    let available = env.vault_available().await?;
+    env.owner_call(
+        "withdraw",
+        json!({"amount": available.saturating_sub(keep)}),
+    )
+    .await?
+    .assert_success();
+    // (Plus the small gas reward the vault earns from the owner's call.)
+    let left = env.vault_available().await?;
+    assert!(left < MILLI(100), "available after withdraw: {left}");
+
+    let before = env.balance(&bob).await?;
+    let res = env.pay(&bob, MILLI(100)).await?.assert_success();
+    let ev = events(&res.logs(), "payment_rejected");
+    assert_eq!(ev.len(), 1, "logs: {:?}", res.logs());
+    assert_eq!(ev[0]["data"]["reason"], "insufficient balance");
+    assert_eq!(res.json::<Value>()?, rejected("insufficient balance"));
+    assert_eq!(env.spent_today().await?, ZERO);
+    assert_eq!(env.balance(&bob).await?, before);
+
+    // What the vault can still afford goes through.
+    assert_eq!(env.pay_json(&bob, MILLI(20)).await?, paid(&bob, MILLI(20)));
+    assert_eq!(env.spent_today().await?, MILLI(20));
+    Ok(())
+}
+
+#[tokio::test]
+async fn report_rejected_while_paused() -> R {
+    let env = Env::with_registry(Registry::Deployed).await?;
+    env.owner_call("pause", json!({})).await?.assert_success();
+    fails_with(env.agent_report("bad1.sandbox", "scam").await?, "paused");
+    assert_eq!(env.spent_today().await?, ZERO);
+    let summary: Value = env
+        .registry_view("get_summary", json!({"target": "bad1.sandbox"}))
+        .await?;
+    assert_eq!(summary["reports"], 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn pay_below_min_gas_fails_without_reserving() -> R {
+    let env = Env::with_registry(Registry::Deployed).await?;
+    let bob = env.account("bob").await?;
+    env.trust(&bob).await?;
+    let before = env.balance(&bob).await?;
+    fails_with(
+        env.pay_with_gas(&bob, MILLI(100), NearGas::from_tgas(39))
+            .await?,
+        "not enough gas",
+    );
+    assert_eq!(env.spent_today().await?, ZERO);
+    assert_eq!(env.balance(&bob).await?, before);
+    // Exactly the minimum (40 TGas) is enough for the whole paid path.
+    let res = env
+        .pay_with_gas(&bob, MILLI(100), NearGas::from_tgas(40))
+        .await?;
+    assert_eq!(
+        res.assert_success().json::<Value>()?,
+        paid(&bob, MILLI(100))
+    );
+    fails_with(
+        env.contract
+            .call_function(
+                "report",
+                json!({"target": "bad1.sandbox", "category": "scam", "tx_hash": null, "note": ""}),
+            )
+            .transaction()
+            .gas(NearGas::from_tgas(34))
+            .with_signer(env.vault.clone(), env.agent.clone())
+            .send_to(&env.net)
+            .await?,
+        "not enough gas",
+    );
+    assert_eq!(env.spent_today().await?, MILLI(100));
+    Ok(())
+}
