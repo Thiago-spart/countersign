@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "countersign": {
+      "command": "pnpm",
+      "args": ["--silent", "--filter", "@countersign/mcp", "start", "--env-file", ".env.sandbox"]
+    }
+  }
+}
