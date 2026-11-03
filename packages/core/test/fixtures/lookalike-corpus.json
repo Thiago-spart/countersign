@@ -1,0 +1,329 @@
+{
+ "cases": [
+  {
+   "target": "acme-c0rp.testnet",
+   "trusted": [
+    "acme-corp.testnet"
+   ],
+   "pastPayees": [],
+   "match": true,
+   "note": "0 for o"
+  },
+  {
+   "target": "acme-corp.evil.testnet",
+   "trusted": [
+    "acme-corp.testnet"
+   ],
+   "pastPayees": [],
+   "match": true,
+   "note": "same label, other parent"
+  },
+  {
+   "target": "acrne-corp.testnet",
+   "trusted": [
+    "acme-corp.testnet"
+   ],
+   "pastPayees": [],
+   "match": true,
+   "note": "rn for m"
+  },
+  {
+   "target": "acme-crop.testnet",
+   "trusted": [
+    "acme-corp.testnet"
+   ],
+   "pastPayees": [],
+   "match": true,
+   "note": "transposition"
+  },
+  {
+   "target": "acme-corp.near",
+   "trusted": [
+    "acme-corp.testnet"
+   ],
+   "pastPayees": [],
+   "match": true,
+   "note": "other suffix"
+  },
+  {
+   "target": "acme-cor.testnet",
+   "trusted": [
+    "acme-corp.testnet"
+   ],
+   "pastPayees": [],
+   "match": true,
+   "note": "deletion"
+  },
+  {
+   "target": "acme-corrp.testnet",
+   "trusted": [
+    "acme-corp.testnet"
+   ],
+   "pastPayees": [],
+   "match": true,
+   "note": "insertion"
+  },
+  {
+   "target": "acme-c0rp.near",
+   "trusted": [
+    "acme-corp.testnet"
+   ],
+   "pastPayees": [],
+   "match": true,
+   "note": "homoglyph and suffix"
+  },
+  {
+   "target": "acmecorp.testnet",
+   "trusted": [
+    "acme-corp.testnet"
+   ],
+   "pastPayees": [],
+   "match": true,
+   "note": "dropped hyphen"
+  },
+  {
+   "target": "acme_corp.testnet",
+   "trusted": [
+    "acme-corp.testnet"
+   ],
+   "pastPayees": [],
+   "match": true,
+   "note": "underscore for hyphen"
+  },
+  {
+   "target": "vvhale-trading.testnet",
+   "trusted": [
+    "whale-trading.testnet"
+   ],
+   "pastPayees": [],
+   "match": true,
+   "note": "vv for w"
+  },
+  {
+   "target": "b0b.testnet",
+   "trusted": [
+    "bob.testnet"
+   ],
+   "pastPayees": [],
+   "match": true,
+   "note": "short label normalized exact"
+  },
+  {
+   "target": "5ushi-bar.testnet",
+   "trusted": [
+    "sushi-bar.testnet"
+   ],
+   "pastPayees": [],
+   "match": true,
+   "note": "5 for s"
+  },
+  {
+   "target": "payro11.testnet",
+   "trusted": [
+    "payroll.testnet"
+   ],
+   "pastPayees": [],
+   "match": true,
+   "note": "1 for l"
+  },
+  {
+   "target": "d3x-capital.testnet",
+   "trusted": [
+    "dex-capital.testnet"
+   ],
+   "pastPayees": [],
+   "match": true,
+   "note": "3 for e"
+  },
+  {
+   "target": "acme-ccrp.testnet",
+   "trusted": [
+    "acme-corp.testnet"
+   ],
+   "pastPayees": [],
+   "match": true,
+   "note": "substitution"
+  },
+  {
+   "target": "vendor-suppl1es.testnet",
+   "trusted": [],
+   "pastPayees": [
+    "vendor-supplies.testnet"
+   ],
+   "match": true,
+   "note": "past payee, 1 for l"
+  },
+  {
+   "target": "acmee-corpp.testnet",
+   "trusted": [
+    "acme-corp.testnet"
+   ],
+   "pastPayees": [],
+   "match": true,
+   "note": "distance 2"
+  },
+  {
+   "target": "bob.near",
+   "trusted": [
+    "bob.testnet"
+   ],
+   "pastPayees": [],
+   "match": true,
+   "note": "short label, other suffix"
+  },
+  {
+   "target": "zebra-foods.testnet",
+   "trusted": [
+    "acme-corp.testnet"
+   ],
+   "pastPayees": [],
+   "match": false,
+   "note": "unrelated"
+  },
+  {
+   "target": "acme-payments.testnet",
+   "trusted": [
+    "acme-corp.testnet"
+   ],
+   "pastPayees": [],
+   "match": false,
+   "note": "shared prefix"
+  },
+  {
+   "target": "pay.acme-corp.testnet",
+   "trusted": [
+    "acme-corp.testnet"
+   ],
+   "pastPayees": [],
+   "match": false,
+   "note": "sub-account"
+  },
+  {
+   "target": "treasury.acme-corp.testnet",
+   "trusted": [
+    "acme-corp.testnet"
+   ],
+   "pastPayees": [],
+   "match": false,
+   "note": "sub-account"
+  },
+  {
+   "target": "rob.testnet",
+   "trusted": [
+    "bob.testnet"
+   ],
+   "pastPayees": [],
+   "match": false,
+   "note": "short label, distance 1"
+  },
+  {
+   "target": "cat.testnet",
+   "trusted": [
+    "bat.testnet"
+   ],
+   "pastPayees": [],
+   "match": false,
+   "note": "short label"
+  },
+  {
+   "target": "acme-corp.testnet",
+   "trusted": [
+    "acme-corp.testnet"
+   ],
+   "pastPayees": [],
+   "match": false,
+   "note": "target is trusted"
+  },
+  {
+   "target": "acme-corp.testnet",
+   "trusted": [],
+   "pastPayees": [
+    "acme-corp.testnet"
+   ],
+   "match": false,
+   "note": "target is its own past payee"
+  },
+  {
+   "target": "acme-corporation.testnet",
+   "trusted": [
+    "acme-corp.testnet"
+   ],
+   "pastPayees": [],
+   "match": false,
+   "note": "longer name"
+  },
+  {
+   "target": "acme-labs.testnet",
+   "trusted": [
+    "acme-corp.testnet"
+   ],
+   "pastPayees": [],
+   "match": false,
+   "note": "shared prefix"
+  },
+  {
+   "target": "acme-xxxp.testnet",
+   "trusted": [
+    "acme-corp.testnet"
+   ],
+   "pastPayees": [],
+   "match": false,
+   "note": "distance 3"
+  },
+  {
+   "target": "global-corp.testnet",
+   "trusted": [
+    "acme-corp.testnet"
+   ],
+   "pastPayees": [],
+   "match": false,
+   "note": "shared suffix word"
+  },
+  {
+   "target": "acme.testnet",
+   "trusted": [
+    "acme-corp.testnet"
+   ],
+   "pastPayees": [],
+   "match": false,
+   "note": "prefix only"
+  },
+  {
+   "target": "north-star.testnet",
+   "trusted": [
+    "acme-corp.testnet"
+   ],
+   "pastPayees": [],
+   "match": false,
+   "note": "unrelated"
+  },
+  {
+   "target": "alice.testnet",
+   "trusted": [],
+   "pastPayees": [],
+   "match": false,
+   "note": "no known accounts"
+  },
+  {
+   "target": "vault.acme-corp.testnet",
+   "trusted": [
+    "acme-corp.testnet"
+   ],
+   "pastPayees": [],
+   "match": false,
+   "note": "sub-account"
+  },
+  {
+   "target": "zebra-foods.testnet",
+   "trusted": [
+    "acme-corp.testnet",
+    "bob.testnet"
+   ],
+   "pastPayees": [
+    "carol.testnet"
+   ],
+   "match": false,
+   "note": "unrelated to all"
+  }
+ ]
+}
