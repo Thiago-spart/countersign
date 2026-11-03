@@ -13,7 +13,10 @@ use near_sdk::{
 use crate::events::VaultEvent;
 use crate::ext::{CATEGORIES, Summary, ext_registry};
 use crate::types::DailyCount;
-use crate::{Contract, ContractExt, MAX_TEXT_BYTES, PayOutcome, available_balance, limits};
+use crate::{
+    AMOUNT_NOT_POSITIVE, Contract, ContractExt, MAX_TEXT_BYTES, PayOutcome, available_balance,
+    limits,
+};
 
 /// Static gas for the registry's `get_summary` view (a single map read).
 pub const GAS_GET_SUMMARY: Gas = Gas::from_tgas(5);
@@ -70,6 +73,9 @@ impl Contract {
         // Checked before reserving: the callback may queue the memo and must
         // not panic.
         require!(memo.len() <= MAX_TEXT_BYTES, "memo exceeds 280 bytes");
+        if amount.is_zero() {
+            return PromiseOrValue::Value(self.reject(None, receiver, amount, AMOUNT_NOT_POSITIVE));
+        }
         if self.paused {
             return PromiseOrValue::Value(self.reject(None, receiver, amount, "paused"));
         }

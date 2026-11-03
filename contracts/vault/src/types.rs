@@ -26,6 +26,23 @@ impl Default for Limits {
     }
 }
 
+impl Limits {
+    /// Panics with "invalid limits: ..." unless
+    /// `unknown_payee_max <= per_tx <= daily` and `registry_pending_threshold >= 1`
+    /// (a threshold of 0 would queue every payment as "registry_flagged").
+    pub fn validate(&self) {
+        near_sdk::require!(self.per_tx <= self.daily, "invalid limits: per_tx > daily");
+        near_sdk::require!(
+            self.unknown_payee_max <= self.per_tx,
+            "invalid limits: unknown_payee_max > per_tx"
+        );
+        near_sdk::require!(
+            self.registry_pending_threshold >= 1,
+            "invalid limits: registry_pending_threshold must be at least 1"
+        );
+    }
+}
+
 /// Result of `pay`, `request_approval` and `approve`.
 /// JSON: `{"status":"paid","receiver":..,"amount":..}`, `{"status":"pending","id":..,"reason":..}`, ...
 #[near(serializers = [json])]

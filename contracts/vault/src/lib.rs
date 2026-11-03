@@ -24,6 +24,8 @@ pub use crate::types::{Limits, PayOutcome, PendingPayment, Spent};
 pub const MAX_PENDING: u32 = 50;
 /// Maximum `memo` / `reason` length in bytes for queued payments.
 pub const MAX_TEXT_BYTES: usize = 280;
+/// Reason given when `pay` / `request_approval` get a zero amount.
+pub const AMOUNT_NOT_POSITIVE: &str = "amount must be positive";
 
 /// Balance not locked for the account's storage stake.
 pub(crate) fn available_balance() -> NearToken {
@@ -55,10 +57,18 @@ impl Contract {
     #[init]
     #[private]
     pub fn new(owner_id: AccountId, registry_id: AccountId, limits: Option<Limits>) -> Self {
+        // The vault's own full-access key is deleted at setup, so a vault that
+        // owned itself could never be withdrawn from or unpaused.
+        require!(
+            owner_id != env::current_account_id(),
+            "owner must be a separate account"
+        );
+        let limits = limits.unwrap_or_default();
+        limits.validate();
         Self {
             owner_id,
             registry_id,
-            limits: limits.unwrap_or_default(),
+            limits,
             paused: false,
             trusted: IterableSet::new(StorageKey::Trusted),
             spent_today: Spent::default(),
@@ -82,6 +92,9 @@ impl Contract {
         self.require_self();
         require!(memo.len() <= MAX_TEXT_BYTES, "memo exceeds 280 bytes");
         require!(reason.len() <= MAX_TEXT_BYTES, "reason exceeds 280 bytes");
+        if amount.is_zero() {
+            return self.reject(None, receiver, amount, AMOUNT_NOT_POSITIVE);
+        }
         if self.paused {
             return self.reject(None, receiver, amount, "paused");
         }
@@ -159,10 +172,12 @@ impl Contract {
         .emit();
     }
 
-    /// Requires exactly 1 yoctoNEAR.
+    /// Requires exactly 1 yoctoNEAR. Panics with "invalid limits" unless
+    /// `unknown_payee_max <= per_tx <= daily` and `registry_pending_threshold >= 1`.
     #[payable]
     pub fn set_limits(&mut self, limits: Limits) {
         self.require_owner_one_yocto();
+        limits.validate();
         self.limits = limits;
     }
 
@@ -318,5 +333,107 @@ impl Contract {
             id: U64(id),
             reason,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use near_sdk::test_utils::{VMContextBuilder, get_logs};
+    use near_sdk::testing_env;
+
+    fn vault() -> AccountId {
+        "vault.near".parse().unwrap()
+    }
+    fn owner() -> AccountId {
+        "owner.near".parse().unwrap()
+    }
+
+    fn ctx(predecessor: AccountId, deposit: NearToken) {
+        testing_env!(
+            VMContextBuilder::new()
+                .current_account_id(vault())
+                .predecessor_account_id(predecessor)
+                .attached_deposit(deposit)
+                .account_balance(NearToken::from_near(10))
+                .block_timestamp(1_000)
+                .build()
+        );
+    }
+
+    fn fresh() -> Contract {
+        ctx(vault(), NearToken::from_yoctonear(0));
+        Contract::new(owner(), "registry.near".parse().unwrap(), None)
+    }
+
+    fn limits(per_tx: u128, daily: u128, unknown: u128, threshold: u32) -> Limits {
+        Limits {
+            per_tx: NearToken::from_millinear(per_tx),
+            daily: NearToken::from_millinear(daily),
+            unknown_payee_max: NearToken::from_millinear(unknown),
+            registry_pending_threshold: threshold,
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "owner must be a separate account")]
+    fn new_rejects_vault_as_owner() {
+        ctx(vault(), NearToken::from_yoctonear(0));
+        Contract::new(vault(), "registry.near".parse().unwrap(), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid limits")]
+    fn new_rejects_invalid_limits() {
+        ctx(vault(), NearToken::from_yoctonear(0));
+        Contract::new(
+            owner(),
+            "registry.near".parse().unwrap(),
+            Some(limits(2_000, 1_000, 100, 2)),
+        );
+    }
+
+    #[test]
+    fn set_limits_rejects_inconsistent_limits() {
+        for (bad, why) in [
+            (limits(2_000, 1_000, 100, 2), "per_tx > daily"),
+            (limits(1_000, 5_000, 2_000, 2), "unknown_payee_max > per_tx"),
+            (limits(1_000, 5_000, 100, 0), "registry_pending_threshold 0"),
+        ] {
+            let mut c = fresh();
+            ctx(owner(), NearToken::from_yoctonear(1));
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.set_limits(bad)));
+            let err = r.expect_err(&format!("accepted {why}"));
+            let msg = err
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_default();
+            assert!(msg.contains("invalid limits"), "{why}: {msg}");
+        }
+        // Equal bounds are fine.
+        let mut c = fresh();
+        ctx(owner(), NearToken::from_yoctonear(1));
+        c.set_limits(limits(1_000, 1_000, 1_000, 1));
+        assert_eq!(c.get_limits(), limits(1_000, 1_000, 1_000, 1));
+    }
+
+    #[test]
+    fn zero_amount_is_rejected() {
+        let mut c = fresh();
+        let bob: AccountId = "bob.near".parse().unwrap();
+        let zero = NearToken::from_yoctonear(0);
+        let want = PayOutcome::Rejected {
+            reason: "amount must be positive".into(),
+        };
+        ctx(vault(), zero);
+        let PromiseOrValue::Value(out) = c.pay(bob.clone(), zero, "m".into()) else {
+            panic!("pay(0) must not make a cross-contract call");
+        };
+        assert_eq!(out, want);
+        assert_eq!(c.request_approval(bob, zero, "m".into(), "r".into()), want);
+        assert!(c.get_pending().is_empty());
+        assert_eq!(c.get_spent_today(), zero);
+        assert!(get_logs().iter().any(|l| l.contains("payment_rejected")));
     }
 }
