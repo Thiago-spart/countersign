@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "near-mcp": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@nearai/near-mcp@0.0.35",
+        "run"
+      ],
+      "env": {}
+    }
+  }
+}

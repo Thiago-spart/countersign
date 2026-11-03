@@ -1,0 +1,28 @@
+# Private notes (hackathon analysis, organizer docs)
+notes/
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*-key.json
+/keys/
+
+# Third-party agent skills (no license; restore with: npx skills experimental_install)
+.claude/skills/
+.claude/settings.local.json
+
+# Build output
+node_modules/
+dist/
+target/
+*.wasm
+coverage/
+.turbo/
+
+# Runtime data
+receipts.jsonl
+.cache/
+*.log
+.DS_Store
