@@ -1,12 +1,12 @@
-# Tripwire: Counterparty Firewall for AI Agents That Pay
+# Countersign: Counterparty Firewall for AI Agents That Pay
 
-_Design spec · 2026-11-03 · Status: draft for review · "Tripwire" is a working name_
+_Design spec · 2026-11-03 · Status: approved 2026-11-03 · Repo: github.com/Thiago-spart/countersign · License: MIT_
 
 ## 1. Summary
 
 AI agents are being given wallets. An agent that reads untrusted input, such as invoices, web pages or tool output, can be prompt-injected into paying the wrong account. Spending limits alone don't help when the attacker's address is still under the limit.
 
-Tripwire checks **who** an agent is about to pay before it signs, using two layers:
+Countersign checks **who** an agent is about to pay before it signs, using two layers:
 
 1. **SDK (offchain).** Scores the receiver from onchain signals: look-alike names, account age, activity, recent contract redeploys, and reports in a shared registry. It returns `allow`, `warn` or `block`, with the reasons.
 2. **Vault (onchain).** Holds the agent's funds. The agent's only key is a function-call key that can call two vault methods. The vault enforces caps, a kill switch and registry checks, so a fully compromised agent still can't drain it.
@@ -20,7 +20,7 @@ A scripted **attack suite** with 7 prompt-injection scenarios is both the demo a
 - Event: NEAR HACKATHON. Submissions close **2026-11-14 23:59 UTC**; the target is to submit on **2026-11-13**. One submission, which can't be edited afterwards.
 - Tracks: `security` (primary), `agents`, `open`.
 - Screening: Claude Code and Codex check that the project reproduces and that README claims match behaviour, then human judges decide. The organizers value scoped keys over full-access keys, rules enforced in the contract, the ability to try the project with no funds, and visible receipts.
-- Gap filled: the Agent API (agentsonintents) already has static caps and allow/block lists. It has **no counterparty risk scoring**, and with `native.near.transfer` enabled an agent can send NEAR to any account regardless of its destination list. Tripwire adds scoring, shared threat intelligence, and an onchain floor that covers native NEAR.
+- Gap filled: the Agent API (agentsonintents) already has static caps and allow/block lists. It has **no counterparty risk scoring**, and with `native.near.transfer` enabled an agent can send NEAR to any account regardless of its destination list. Countersign adds scoring, shared threat intelligence, and an onchain floor that covers native NEAR.
 
 ## 3. Goals and non-goals
 
@@ -68,7 +68,7 @@ A scripted **attack suite** with 7 prompt-injection scenarios is both the demo a
 | `packages/core` | Signal providers, scorer and policy loader. Contains no signing code |
 | `packages/sdk` | `guardedAgent`: check, then call the vault, then write a receipt |
 | `packages/mcp` | MCP server (`@modelcontextprotocol/sdk`) |
-| `packages/cli` | `tripwire` CLI (check, approve, deny, pause, report, status, demo) |
+| `packages/cli` | `countersign` CLI (check, approve, deny, pause, report, status, demo) |
 | `attacks/` | Scripted attack scenarios and their runner |
 | `policy.json` | Every scoring weight and threshold |
 | `fixtures/` | Recorded signal data for sandbox mode |
@@ -116,11 +116,11 @@ Approved payments count toward `spent_today` when they're approved. If the daily
 
 The pending queue has a maximum size (50). The vault pays for its own storage from its balance; if the queue is full, `request_approval` rejects. This stops a compromised agent from growing storage without limit.
 
-Events are NEP-297: `EVENT_JSON:{"standard":"tripwire","version":"1.0.0","event":"payment_paid|payment_pending|payment_rejected|payment_approved|payment_denied|paused|unpaused",...}`.
+Events are NEP-297: `EVENT_JSON:{"standard":"countersign","version":"1.0.0","event":"payment_paid|payment_pending|payment_rejected|payment_approved|payment_denied|paused|unpaused",...}`.
 
 ### 5.2 Registry
 
-One shared contract, e.g. `registry.tripwire.testnet`. It has no owner or admin and can't be upgraded after deployment; its full access key is deleted.
+One shared contract, e.g. `registry.countersign.testnet`. It has no owner or admin and can't be upgraded after deployment; its full access key is deleted.
 
 State: `reports: LookupMap<target, IterableMap<reporter, Report>>` (or a flat map keyed by `(target, reporter)`), `summaries: LookupMap<target, Summary>`, `rebuttals: LookupMap<target, Rebuttal>`.
 
@@ -163,7 +163,7 @@ If the receiver is on the trusted list, the `lookalike`, `first_contact` and `ag
 | `testnet` | NearBlocks testnet API + testnet RPC + the deployed registry | testnet vault |
 | `mainnet` | NearBlocks + mainnet RPC; read-only | disabled in v1 |
 
-NearBlocks responses are cached on disk for 10 minutes (`~/.cache/tripwire`). Requests retry with backoff, at most 3 attempts.
+NearBlocks responses are cached on disk for 10 minutes (`~/.cache/countersign`). Requests retry with backoff, at most 3 attempts.
 
 ## 7. SDK, MCP and CLI
 
@@ -186,7 +186,7 @@ Every outcome is appended to `receipts.jsonl` as `{ts, to, amount, verdict, outc
 - `report_counterparty(account, category, note, tx_hash?)` → calls `vault.report()`, which forwards the report to the registry (see §5.1 and §14, open question 1).
 - **No** approve, deny, withdraw or limits tools. The agent can't call those methods even through MCP.
 
-### 7.3 CLI (`tripwire`)
+### 7.3 CLI (`countersign`)
 `check <account> [--network]` · `status` (limits, spent today, pending, remaining key allowance) · `approve <id>` · `deny <id>` · `pause` · `unpause` · `report …` · `setup --network testnet` (creates the vault sub-account, deploys it, adds the function-call key, funds it, and writes `.env`) · `attacks [--network]`.
 
 The owner key comes from `.env` (`OWNER_PRIVATE_KEY`) or a near-cli keychain, and is never committed.
@@ -224,7 +224,7 @@ The agent replays a fixed conversation with the injection in its tool output, so
 
 ## 11. Submission requirements (from HACKATHON.md)
 
-- Public repo by the deadline, MIT `LICENSE`, and a README written for an AI judge: what it is, the problem, and numbered "do X → see Y" steps. The quick start is `pnpm i && pnpm attacks`. No marketing.
+- Public repo (`Thiago-spart/countersign`, created 2026-11-03, inside the hackathon window that opened 2026-10-19), MIT `LICENSE`, and a README written for an AI judge: what it is, the problem, and numbered "do X → see Y" steps. The quick start is `pnpm i && pnpm attacks`. No marketing.
 - The README lists libraries, templates and AI-generated code, and has a "Limits" section covering what the key can't do, the sybil resistance limits of the registry, and the fixture data used in sandbox mode.
 - No secrets in the git history. `.env.example` only.
 - X post: the problem in the first line, one complete moment (an injected agent being stopped), what NEAR does concretely (scoped function-call keys and onchain enforcement), tags @NEARProtocol and #NEARHackathon (plus @NearBuilders and @NearLegion), and a video.
@@ -242,7 +242,7 @@ The agent replays a fixed conversation with the injection in its tool output, so
 | Day | Deliverable | Done when |
 |---|---|---|
 | Nov 9 | Registry + vault contracts and Rust tests | `cargo test` passes for every §10 contract case |
-| Nov 10 | `core`: providers, scorer, policy, fixtures | vitest passes; `tripwire check <acct> --network mainnet` works |
+| Nov 10 | `core`: providers, scorer, policy, fixtures | vitest passes; `countersign check <acct> --network mainnet` works |
 | Nov 11 | `sdk`, `cli`, `mcp` | Claude Desktop/Code can call `safe_transfer` against the sandbox |
 | Nov 12 | Attack suite, sandbox runner, testnet deploy, CI | `pnpm attacks` shows 7/7 PASS locally and on testnet |
 | Nov 13 | README, SECURITY.md audit, video, X post, submission | the human has confirmed and sent the payload |
@@ -259,4 +259,4 @@ Before Nov 9 (prep around MLH): create testnet and mainnet accounts, install Rus
 
 **Open questions (defaults chosen; change them while reviewing if you prefer)**
 1. Who reports to the registry from MCP? Default: the vault account signs via a third allowed method, `report`, forwarded to the registry. Alternative: only the owner reports, via the CLI.
-2. Final project name. Default: "Tripwire". Check for name clashes on GitHub/npm before creating the repo.
+2. Name: decided as **Countersign**. The plain npm name is taken, so packages publish under the `@thiago-spart/` scope.
