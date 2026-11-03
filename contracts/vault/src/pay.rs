@@ -50,6 +50,12 @@ pub const MAX_TX_HASH_BYTES: usize = 64;
 
 pub const TRANSFER_FAILED: &str = "transfer failed";
 pub const INSUFFICIENT_BALANCE: &str = "insufficient balance";
+/// Outcome of a callback invoked without exactly one promise result (i.e.
+/// called directly rather than by `.then`). Nothing is released or sent.
+pub const NOT_A_CALLBACK: &str = "not called as a callback";
+/// Bytes read from a transfer / report result (both are empty in practice;
+/// only success vs failure matters).
+pub const MAX_EMPTY_RESULT_BYTES: usize = 64;
 
 /// Parse a `get_summary` response; `None` if it is not a registry summary.
 pub fn parse_summary(bytes: &[u8]) -> Option<Summary> {
@@ -172,15 +178,19 @@ impl Contract {
         memo: String,
         reserved_day: u64,
     ) -> PromiseOrValue<PayOutcome> {
+        // The agent signs as the vault, so `#[private]` alone doesn't tell a
+        // `.then` apart from a direct call (the key's method list does). A
+        // direct call has no promise result: release nothing, send nothing.
+        if env::promise_results_count() != 1 {
+            return PromiseOrValue::Value(PayOutcome::Rejected {
+                reason: NOT_A_CALLBACK.to_string(),
+            });
+        }
         // Read the result by hand: `#[callback_result]` would panic on a
         // malformed response, stranding the reservation.
-        let summary = if env::promise_results_count() == 1 {
-            env::promise_result_checked(0, MAX_SUMMARY_BYTES)
-                .ok()
-                .and_then(|b| parse_summary(&b))
-        } else {
-            None
-        };
+        let summary = env::promise_result_checked(0, MAX_SUMMARY_BYTES)
+            .ok()
+            .and_then(|b| parse_summary(&b));
         let Some(summary) = summary else {
             self.release(reserved_day, amount);
             return PromiseOrValue::Value(self.reject(
@@ -233,9 +243,20 @@ impl Contract {
         receiver: AccountId,
         amount: NearToken,
         reserved_day: u64,
-        #[callback_result] r: Result<(), PromiseError>,
     ) -> PayOutcome {
-        if r.is_err() {
+        // See `on_registry_summary`. The result is read by hand so unexpected
+        // data can't make this callback panic.
+        if env::promise_results_count() != 1 {
+            return PayOutcome::Failed {
+                reason: NOT_A_CALLBACK.to_string(),
+            };
+        }
+        // Only a failed promise counts as failed; an oversized (TooLong) result
+        // still means the call succeeded.
+        if matches!(
+            env::promise_result_checked(0, MAX_EMPTY_RESULT_BYTES),
+            Err(PromiseError::Failed)
+        ) {
             self.release(reserved_day, amount);
             VaultEvent::PaymentFailed {
                 id,
@@ -264,9 +285,18 @@ impl Contract {
         target: AccountId,
         category: String,
         reserved_day: u64,
-        #[callback_result] r: Result<(), PromiseError>,
     ) -> bool {
-        if r.is_err() {
+        // See `on_registry_summary` and `on_transfer_done`.
+        if env::promise_results_count() != 1 {
+            env::log_str(NOT_A_CALLBACK);
+            return false;
+        }
+        // Only a failed promise counts as failed; an oversized (TooLong) result
+        // still means the call succeeded.
+        if matches!(
+            env::promise_result_checked(0, MAX_EMPTY_RESULT_BYTES),
+            Err(PromiseError::Failed)
+        ) {
             // The registry panicked, so the deposit came back with the refund.
             self.release(reserved_day, REPORT_DEPOSIT);
             env::log_str("registry refused the report; deposit released");
@@ -375,5 +405,56 @@ mod tests {
         );
         assert_eq!(c.get_spent_today(), NearToken::from_yoctonear(0));
         assert!(get_logs().iter().any(|l| l.contains("payment_rejected")));
+    }
+
+    /// Callbacks called directly (no promise result), e.g. by a key that can
+    /// sign as the vault: nothing is released, nothing is sent, no panic.
+    #[test]
+    fn callbacks_without_a_promise_result_change_nothing() {
+        let ctx = VMContextBuilder::new()
+            .current_account_id(vault())
+            .predecessor_account_id(vault())
+            .account_balance(NearToken::from_near(10))
+            .block_timestamp(1_000)
+            .build();
+        testing_env!(ctx);
+        let mut c = Contract::new(
+            "owner.near".parse().unwrap(),
+            "registry.near".parse().unwrap(),
+            None,
+        );
+        let amount = NearToken::from_millinear(100);
+        limits::reserve(&mut c.spent_today, 1_000, amount.as_yoctonear(), u128::MAX).unwrap();
+        let bob: AccountId = "bob.near".parse().unwrap();
+        assert_eq!(env::promise_results_count(), 0);
+
+        let out = c.on_registry_summary(bob.clone(), amount, "m".into(), 0);
+        let PromiseOrValue::Value(out) = out else {
+            panic!("must not create a promise")
+        };
+        assert_eq!(
+            out,
+            PayOutcome::Rejected {
+                reason: NOT_A_CALLBACK.into()
+            }
+        );
+        assert_eq!(c.get_spent_today(), amount, "on_registry_summary released");
+
+        assert_eq!(
+            c.on_transfer_done(None, bob.clone(), amount, 0),
+            PayOutcome::Failed {
+                reason: NOT_A_CALLBACK.into()
+            }
+        );
+        assert_eq!(c.get_spent_today(), amount, "on_transfer_done released");
+
+        assert!(!c.on_report_done(bob, "scam".into(), 0));
+        assert_eq!(c.get_spent_today(), amount, "on_report_done released");
+        assert!(c.get_pending().is_empty());
+        assert!(
+            !get_logs().iter().any(|l| l.starts_with("EVENT_JSON:")),
+            "no events: {:?}",
+            get_logs()
+        );
     }
 }
