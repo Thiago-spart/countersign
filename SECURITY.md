@@ -55,7 +55,7 @@ Result: **no High or Medium findings.** Three Low findings were fixed with tests
 | I-6 | Info | vault | `get_trusted` returns the whole trusted set. It is owner-managed and a view, so the only effect of a huge set is a view that runs out of gas. | Accepted. |
 | I-7 | Info | vault | Reports filed through a vault can't be withdrawn: the vault has no `withdraw_report` forwarder (and the agent key couldn't call the registry directly). | Accepted. |
 | I-8 | Info | registry | A refund to a reporter account deleted before the refund lands bounces back to the registry and stays there. | Accepted. |
-| I-9 | Info | both | `cargo near build non-reproducible-wasm` embeds the builder's cargo registry path (`$HOME/.cargo/registry/...`) and the rustc commit in panic strings, so the committed wasm can't be byte-compared with a CI build. | Accepted. CI rebuilds and tests from source instead of diffing `contracts/res`. |
+| I-9 | Info | both | `cargo near build non-reproducible-wasm` embedded the builder's cargo registry path (`$HOME/.cargo/registry/...`, including the local username) in panic strings. | **Fixed**: `scripts/build-contracts.sh` remaps the cargo home to `/cargo` and the repo root to `/countersign` (`--remap-path-prefix`). The wasm still records the rustc commit. Clean builds from two checkouts at different paths on one machine are byte-identical; a match across machines is not verified, so CI rebuilds and tests from source instead of diffing `contracts/res`. |
 
 ### Fixed during development (before this audit)
 

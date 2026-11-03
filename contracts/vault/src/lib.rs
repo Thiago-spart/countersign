@@ -151,7 +151,8 @@ impl Contract {
         .emit();
     }
 
-    /// Kill switch: while paused, `pay`, `request_approval` and `approve` reject.
+    /// Kill switch: while paused, `pay`, `request_approval` and `approve`
+    /// reject, and `report` panics.
     pub fn pause(&mut self) {
         self.require_owner();
         self.paused = true;

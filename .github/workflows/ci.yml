@@ -30,10 +30,10 @@ jobs:
   # Rebuild the contracts from source, run the Rust sandbox tests, then the
   # attack suite again on the fresh wasm.
   #
-  # There is no `git diff --exit-code contracts/res` check: `cargo near build
-  # non-reproducible-wasm` embeds the builder's $HOME (cargo registry paths)
-  # and the rustc commit in the wasm, so a runner's build differs byte-for-byte
-  # from the committed one even though both come from the same source.
+  # There is no `git diff --exit-code contracts/res` check. build-contracts.sh
+  # remaps the cargo home and repo paths, and clean builds match byte-for-byte
+  # on the machine that built the committed wasm, but a match on a runner
+  # (other OS image, toolchain install, cargo registry) is not verified.
   contracts:
     name: Contracts (build from source)
     runs-on: ubuntu-latest

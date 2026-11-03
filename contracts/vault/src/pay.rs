@@ -58,10 +58,12 @@ pub fn parse_summary(bytes: &[u8]) -> Option<Summary> {
 
 #[near]
 impl Contract {
-    /// Pay `receiver` from the vault (agent key only), in the order of spec
-    /// §5.1.1: pause, per-tx cap, reserve against the daily cap, then the
-    /// registry check in `on_registry_summary`. Returns `Paid`, `Pending`,
-    /// `Rejected` or `Failed` (the transfer itself failed).
+    /// Pay `receiver` from the vault (agent key only). Checks, in order: at
+    /// least 40 TGas and a memo of at most 280 bytes (panics), then zero
+    /// amount, pause, per-tx cap and free balance (`Rejected`), then reserves
+    /// against the daily cap; the registry check, unknown-payee cap and a
+    /// second balance check run in `on_registry_summary`. Returns `Paid`,
+    /// `Pending`, `Rejected` or `Failed` (the transfer itself failed).
     pub fn pay(
         &mut self,
         receiver: AccountId,
