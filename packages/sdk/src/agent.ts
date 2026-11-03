@@ -9,7 +9,8 @@ import {
   type Verdict,
 } from "@countersign/core";
 import { parseNearAmount } from "./amount.js";
-import { MainnetSigningDisabledError } from "./errors.js";
+import { ConfigError } from "@countersign/core";
+import { InvalidInputError, MainnetSigningDisabledError } from "./errors.js";
 import { ReceiptLog, type Receipt } from "./receipts.js";
 import { VaultClient, type PayOutcome } from "./vaultClient.js";
 
@@ -40,7 +41,7 @@ export interface GuardedAgentOpts {
 }
 
 /** Truncate to at most `max` UTF-8 bytes without splitting a character. */
-function truncateBytes(s: string, max: number): string {
+export function truncateBytes(s: string, max: number): string {
   if (Buffer.byteLength(s, "utf8") <= max) return s;
   let out = "";
   for (const ch of s) {
@@ -106,20 +107,43 @@ export async function guardedAgent(opts: GuardedAgentOpts): Promise<GuardedAgent
     return outcome;
   };
 
+  /** Error message for a receipt: no keys from the config, single line, ≤ 280 bytes. */
+  const sanitize = (e: unknown): string => {
+    let msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+    for (const secret of [config.agentKey, config.ownerKey]) {
+      if (secret) msg = msg.split(secret).join("[redacted]");
+    }
+    return truncateBytes(msg.replace(/\s+/g, " ").trim(), MAX_TEXT_BYTES);
+  };
+
   const safeTransfer = async (to: string, amountNear: string, memo = ""): Promise<Outcome> => {
     // Mainnet is read-only: refuse before scoring, building or signing anything.
     if (config.network === "mainnet") throw new MainnetSigningDisabledError("safeTransfer");
     const amount = parseNearAmount(amountNear);
-    if (Buffer.byteLength(memo, "utf8") > MAX_TEXT_BYTES) throw new Error(`memo exceeds ${MAX_TEXT_BYTES} bytes`);
+    if (Buffer.byteLength(memo, "utf8") > MAX_TEXT_BYTES) {
+      throw new InvalidInputError("memo", `exceeds ${MAX_TEXT_BYTES} bytes`);
+    }
     const v = requireVault();
+    // Config problems fail before scoring.
+    if (!config.agentKey) {
+      throw new ConfigError("COUNTERSIGN_AGENT_KEY is not set (the agent's function-call key)", "COUNTERSIGN_AGENT_KEY");
+    }
 
     const verdict = await check(to);
     if (verdict.decision === "block") return record(to, amount, { status: "refused", verdict });
 
-    const res =
-      verdict.decision === "warn"
-        ? await v.requestApproval(to, amount, memo, truncateBytes(verdict.reasons.join("; "), MAX_TEXT_BYTES))
-        : await v.pay(to, amount, memo);
+    let res;
+    try {
+      res =
+        verdict.decision === "warn"
+          ? await v.requestApproval(to, amount, memo, truncateBytes(verdict.reasons.join("; "), MAX_TEXT_BYTES))
+          : await v.pay(to, amount, memo);
+    } catch (e) {
+      // The transaction may have landed (e.g. a timeout after broadcast): log it, then rethrow so the
+      // caller treats the payment as indeterminate rather than as a clean `failed`.
+      record(to, amount, { status: "failed", reason: `send error: ${sanitize(e)}`, verdict });
+      throw e;
+    }
     return record(to, amount, toOutcome(res.outcome, res.txHash, verdict), res.txHash);
   };
 

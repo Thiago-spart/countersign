@@ -1,10 +1,12 @@
 import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { DataSource } from "@countersign/core";
+import { ConfigError, type DataSource } from "@countersign/core";
+import { KeyPair } from "near-api-js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   guardedAgent,
+  InvalidInputError,
   MainnetSigningDisabledError,
   parseNearAmount,
   VaultClient,
@@ -146,6 +148,49 @@ describe("guardedAgent in the sandbox", { timeout: 30_000 }, () => {
     expect(receiptLines().length).toBe(lines);
     expect(await vault.getPending()).toEqual(pending);
     expect(await vault.getSpentToday()).toBe(spent);
+    expect(await env.balance(TRUSTED)).toBe(balance);
+  });
+
+  it("a memo over 280 bytes throws InvalidInputError before anything is sent", async () => {
+    const lines = receiptLines().length;
+    await expect(agent.safeTransfer(TRUSTED, "0.1", "é".repeat(141))).rejects.toBeInstanceOf(InvalidInputError);
+    expect(receiptLines().length).toBe(lines);
+  });
+
+  it("a missing agent key fails before scoring", async () => {
+    let used = 0;
+    const untouchable: DataSource = new Proxy({} as DataSource, {
+      get: () => () => {
+        used++;
+        throw new Error("data source must not be used");
+      },
+    });
+    const { agentKey: _omit, ...noKey } = env.config;
+    const a = await guardedAgent({ config: noKey, receiptsPath, dataSource: untouchable });
+    const lines = receiptLines().length;
+    await expect(a.safeTransfer(TRUSTED, "0.1")).rejects.toBeInstanceOf(ConfigError);
+    expect(used).toBe(0);
+    expect(receiptLines().length).toBe(lines);
+  });
+
+  it("a vault call that throws writes one failed receipt and rethrows", async () => {
+    const wrongKey = KeyPair.fromRandom("ed25519").toString();
+    const a = await guardedAgent({ config: { ...env.config, agentKey: wrongKey }, receiptsPath });
+    const lines = receiptLines().length;
+    const balance = await env.balance(TRUSTED);
+    const err = await a.safeTransfer(TRUSTED, "0.1").then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(Error);
+    const after = receiptLines();
+    expect(after.length).toBe(lines + 1);
+    const r = JSON.parse(after.at(-1)!) as { to: string; outcome: { status: string; reason: string } };
+    expect(r.to).toBe(TRUSTED);
+    expect(r.outcome.status).toBe("failed");
+    expect(r.outcome.reason).toMatch(/^send error: /);
+    expect(after.at(-1)).not.toContain(wrongKey);
+    expect(after.at(-1)).not.toContain(env.config.ownerKey!);
     expect(await env.balance(TRUSTED)).toBe(balance);
   });
 

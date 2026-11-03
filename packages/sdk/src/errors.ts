@@ -13,3 +13,14 @@ export class InvalidAmountError extends Error {
     this.name = "InvalidAmountError";
   }
 }
+
+/** An input other than the amount is invalid (e.g. a memo over 280 bytes). Nothing was scored or sent. */
+export class InvalidInputError extends Error {
+  constructor(
+    readonly field: string,
+    message: string,
+  ) {
+    super(`invalid ${field}: ${message}`);
+    this.name = "InvalidInputError";
+  }
+}

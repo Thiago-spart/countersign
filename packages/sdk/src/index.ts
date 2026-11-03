@@ -9,4 +9,4 @@ export {
 } from "./vaultClient.js";
 export { parseNearAmount, formatNear } from "./amount.js";
 export { ReceiptLog, DEFAULT_RECEIPTS_PATH, type Receipt } from "./receipts.js";
-export { MainnetSigningDisabledError, InvalidAmountError } from "./errors.js";
+export { MainnetSigningDisabledError, InvalidAmountError, InvalidInputError } from "./errors.js";

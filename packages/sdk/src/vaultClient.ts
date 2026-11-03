@@ -64,10 +64,25 @@ function failureOf(res: TxResponse): unknown {
   return typeof status === "object" && status !== null && "Failure" in status ? status.Failure : undefined;
 }
 
-const isOutcome = (v: unknown): v is PayOutcome =>
-  typeof v === "object" &&
-  v !== null &&
-  ["paid", "pending", "rejected", "failed"].includes((v as { status?: unknown }).status as string);
+const isStr = (v: unknown): v is string => typeof v === "string";
+
+/** Validate a vault PayOutcome per status; anything malformed becomes `failed` with a reason. */
+export function parseOutcome(value: unknown, method: string): PayOutcome {
+  const o = (typeof value === "object" && value !== null ? value : {}) as Record<string, unknown>;
+  switch (o.status) {
+    case "paid":
+      if (isStr(o.receiver) && isStr(o.amount)) return { status: "paid", receiver: o.receiver, amount: o.amount };
+      break;
+    case "pending":
+      if (isStr(o.id) && isStr(o.reason)) return { status: "pending", id: o.id, reason: o.reason };
+      break;
+    case "rejected":
+    case "failed":
+      if (isStr(o.reason)) return { status: o.status, reason: o.reason };
+      break;
+  }
+  return { status: "failed", reason: `unexpected ${method} result: ${JSON.stringify(value) ?? "undefined"}` };
+}
 
 /**
  * Talks to one vault. Agent methods sign with the agent's function-call key (signer = the vault);
@@ -129,11 +144,13 @@ export class VaultClient {
     if (failure !== undefined) return { txHash, outcome: { status: "failed", reason: failureReason(failure) } };
     // The tx status is the value at the end of the promise chain (pay → get_summary →
     // on_registry_summary → transfer → on_transfer_done), i.e. the final PayOutcome.
-    const value = decodeSuccess(res);
-    if (!isOutcome(value)) {
-      return { txHash, outcome: { status: "failed", reason: `unexpected ${method} result: ${JSON.stringify(value)}` } };
+    let value: unknown;
+    try {
+      value = decodeSuccess(res);
+    } catch {
+      return { txHash, outcome: { status: "failed", reason: `unexpected ${method} result: not JSON` } };
     }
-    return { txHash, outcome: value };
+    return { txHash, outcome: parseOutcome(value, method) };
   }
 
   /** Sends a call that must succeed; a failed transaction throws with the contract's message. */
