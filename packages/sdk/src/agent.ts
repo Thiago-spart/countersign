@@ -10,7 +10,7 @@ import {
 } from "@countersign/core";
 import { parseNearAmount } from "./amount.js";
 import { ConfigError } from "@countersign/core";
-import { InvalidInputError, MainnetSigningDisabledError } from "./errors.js";
+import { InvalidInputError, MainnetSigningDisabledError, redactError, redactSecrets } from "./errors.js";
 import { ReceiptLog, type Receipt } from "./receipts.js";
 import { VaultClient, type PayOutcome } from "./vaultClient.js";
 
@@ -107,13 +107,11 @@ export async function guardedAgent(opts: GuardedAgentOpts): Promise<GuardedAgent
     return outcome;
   };
 
-  /** Error message for a receipt: no keys from the config, single line, ≤ 280 bytes. */
+  const secrets = [config.agentKey, config.ownerKey];
+  /** Error text for a receipt: no keys, single line, ≤ 280 bytes. */
   const sanitize = (e: unknown): string => {
-    let msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-    for (const secret of [config.agentKey, config.ownerKey]) {
-      if (secret) msg = msg.split(secret).join("[redacted]");
-    }
-    return truncateBytes(msg.replace(/\s+/g, " ").trim(), MAX_TEXT_BYTES);
+    const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+    return truncateBytes(redactSecrets(msg, secrets).replace(/\s+/g, " ").trim(), MAX_TEXT_BYTES);
   };
 
   const safeTransfer = async (to: string, amountNear: string, memo = ""): Promise<Outcome> => {
@@ -141,8 +139,15 @@ export async function guardedAgent(opts: GuardedAgentOpts): Promise<GuardedAgent
     } catch (e) {
       // The transaction may have landed (e.g. a timeout after broadcast): log it, then rethrow so the
       // caller treats the payment as indeterminate rather than as a clean `failed`.
-      record(to, amount, { status: "failed", reason: `send error: ${sanitize(e)}`, verdict });
-      throw e;
+      // Rethrow a redacted copy (original as `cause`) so callers that print it never show a key.
+      const safe = redactError(e, secrets);
+      try {
+        record(to, amount, { status: "failed", reason: `send error: ${sanitize(e)}`, verdict });
+      } catch (recErr) {
+        safe.message += ` (receipt not written: ${redactSecrets(recErr instanceof Error ? recErr.message : String(recErr), secrets)})`;
+        safe.stack = `${safe.name}: ${safe.message}\n${(safe.stack ?? "").split("\n").slice(1).join("\n")}`;
+      }
+      throw safe;
     }
     return record(to, amount, toOutcome(res.outcome, res.txHash, verdict), res.txHash);
   };

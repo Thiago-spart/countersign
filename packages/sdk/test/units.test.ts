@@ -1,6 +1,35 @@
 import { describe, expect, it } from "vitest";
 import { truncateBytes } from "../src/agent.js";
 import { parseOutcome } from "../src/vaultClient.js";
+import { redactSecrets, redactError } from "../src/index.js";
+import { KeyPair } from "near-api-js";
+
+describe("redactSecrets / redactError", () => {
+  const configured = KeyPair.fromRandom("ed25519").toString();
+  const other = KeyPair.fromRandom("ed25519");
+  const otherSecret = other.toString();
+  const pub = other.getPublicKey().toString();
+  const body = configured.slice("ed25519:".length);
+
+  it("redacts configured keys (with or without prefix) and any secret-key-shaped string; keeps public keys", () => {
+    const text = `key ${configured} body ${body} other ${otherSecret} pub ${pub}`;
+    const out = redactSecrets(text, [configured, undefined]);
+    expect(out).not.toContain(body);
+    expect(out).not.toContain(otherSecret.slice(8));
+    expect(out).toContain(pub);
+    expect(out).toContain("[redacted]");
+  });
+
+  it("redactError keeps the name, redacts message and stack, keeps the original as cause", () => {
+    const orig = new TypeError(`bad ${configured} and ${otherSecret}`);
+    const e = redactError(orig, [configured]);
+    expect(e.name).toBe("TypeError");
+    expect(e.message).not.toContain(body);
+    expect(e.message).not.toContain(otherSecret.slice(8));
+    expect(e.stack?.split("\n")[0]).not.toContain(body);
+    expect(e.cause).toBe(orig);
+  });
+});
 
 describe("truncateBytes", () => {
   it("cuts a multibyte string over 280 bytes to ≤ 280 bytes without splitting a character", () => {

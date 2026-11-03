@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConfigError, type DataSource } from "@countersign/core";
 import { KeyPair } from "near-api-js";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   guardedAgent,
   InvalidInputError,
@@ -192,6 +192,44 @@ describe("guardedAgent in the sandbox", { timeout: 30_000 }, () => {
     expect(after.at(-1)).not.toContain(wrongKey);
     expect(after.at(-1)).not.toContain(env.config.ownerKey!);
     expect(await env.balance(TRUSTED)).toBe(balance);
+  });
+
+  describe("send errors never leak keys", () => {
+    afterEach(() => vi.restoreAllMocks());
+    const leaky = () => {
+      const stray = KeyPair.fromRandom("ed25519");
+      const msg = `rpc said ${env.config.agentKey} / ${stray.toString()} / pub ${stray.getPublicKey().toString()}`;
+      return { stray, err: new Error(msg) };
+    };
+    const body = (k: string) => k.slice("ed25519:".length);
+
+    it("redacts the configured key and any secret-shaped key in the receipt and the rethrown error", async () => {
+      const { stray, err } = leaky();
+      vi.spyOn(VaultClient.prototype, "pay").mockRejectedValue(err);
+      const lines = receiptLines().length;
+      const thrown = (await agent.safeTransfer(TRUSTED, "0.1").catch((e: unknown) => e)) as Error;
+      const after = receiptLines();
+      expect(after.length).toBe(lines + 1);
+      for (const text of [after.at(-1)!, thrown.message, thrown.stack!.split("\n")[0]!]) {
+        expect(text).not.toContain(body(env.config.agentKey!));
+        expect(text).not.toContain(body(stray.toString()));
+        expect(text).toContain(stray.getPublicKey().toString());
+      }
+      expect(thrown.cause).toBe(err);
+    });
+
+    it("a receipt write failure doesn't mask the send error", async () => {
+      const { stray, err } = leaky();
+      vi.spyOn(VaultClient.prototype, "pay").mockRejectedValue(err);
+      vi.spyOn(ReceiptLog.prototype, "append").mockImplementation(() => {
+        throw new Error("disk full");
+      });
+      const thrown = (await agent.safeTransfer(TRUSTED, "0.1").catch((e: unknown) => e)) as Error;
+      expect(thrown.message).toContain("rpc said");
+      expect(thrown.message).toContain("disk full");
+      expect(thrown.message).not.toContain(body(env.config.agentKey!));
+      expect(thrown.message).not.toContain(body(stray.toString()));
+    });
   });
 
   it("owner can approve a pending payment through the VaultClient", async () => {
