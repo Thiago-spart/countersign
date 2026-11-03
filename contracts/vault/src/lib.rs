@@ -82,8 +82,10 @@ impl Contract {
 
     /// Pay a pending payment. Re-checks pause and the daily cap; if either
     /// fails it returns `Rejected` and the payment stays pending.
+    /// Requires exactly 1 yoctoNEAR (a full-access key on the owner account).
+    #[payable]
     pub fn approve(&mut self, id: U64) -> PromiseOrValue<PayOutcome> {
-        self.require_owner();
+        self.require_owner_one_yocto();
         let Some(p) = self.pending.get(&id.0).cloned() else {
             env::panic_str("no such pending payment");
         };
@@ -133,8 +135,10 @@ impl Contract {
         .emit();
     }
 
+    /// Requires exactly 1 yoctoNEAR.
+    #[payable]
     pub fn unpause(&mut self) {
-        self.require_owner();
+        self.require_owner_one_yocto();
         self.paused = false;
         VaultEvent::Unpaused {
             by: env::predecessor_account_id(),
@@ -142,26 +146,37 @@ impl Contract {
         .emit();
     }
 
+    /// Requires exactly 1 yoctoNEAR.
+    #[payable]
     pub fn set_limits(&mut self, limits: Limits) {
-        self.require_owner();
+        self.require_owner_one_yocto();
         self.limits = limits;
     }
 
+    /// Requires exactly 1 yoctoNEAR.
+    #[payable]
     pub fn trust(&mut self, account_id: AccountId) {
-        self.require_owner();
+        self.require_owner_one_yocto();
         self.trusted.insert(account_id);
     }
 
+    /// Requires exactly 1 yoctoNEAR.
+    #[payable]
     pub fn untrust(&mut self, account_id: AccountId) {
-        self.require_owner();
+        self.require_owner_one_yocto();
         self.trusted.remove(&account_id);
     }
 
-    /// Send `amount` from the vault to the owner.
+    /// Send `amount` from the vault to the owner. The storage stake stays
+    /// locked. Requires exactly 1 yoctoNEAR.
+    #[payable]
     pub fn withdraw(&mut self, amount: NearToken) -> Promise {
-        self.require_owner();
+        self.require_owner_one_yocto();
         require!(!amount.is_zero(), "amount must be positive");
-        require!(amount <= env::account_balance(), "insufficient balance");
+        let storage_stake =
+            env::storage_byte_cost().saturating_mul(u128::from(env::storage_usage()));
+        let available = env::account_balance().saturating_sub(storage_stake);
+        require!(amount <= available, "insufficient available balance");
         Promise::new(self.owner_id.clone()).transfer(amount)
     }
 
@@ -207,6 +222,13 @@ impl Contract {
             env::predecessor_account_id() == self.owner_id,
             "only the owner can call this"
         );
+    }
+
+    /// Owner gate for methods that loosen controls or move funds: also
+    /// requires exactly 1 yoctoNEAR, which only a full-access key can attach.
+    fn require_owner_one_yocto(&self) {
+        self.require_owner();
+        near_sdk::assert_one_yocto();
     }
 
     /// Emit `payment_rejected` and build the `Rejected` outcome.

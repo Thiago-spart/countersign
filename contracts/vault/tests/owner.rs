@@ -46,6 +46,18 @@ fn wasm() -> &'static [u8] {
 }
 
 const AGENT_METHODS: [&str; 3] = ["pay", "request_approval", "report"];
+/// Owner methods that loosen controls or move funds require exactly 1 yoctoNEAR.
+const ONE_YOCTO_METHODS: [&str; 6] = [
+    "approve",
+    "unpause",
+    "set_limits",
+    "trust",
+    "untrust",
+    "withdraw",
+];
+const NOT_OWNER: &str = "only the owner can call this";
+const NOT_SELF: &str = "only the vault itself can call this";
+const ONE_YOCTO_MSG: &str = "Requires attached deposit of exactly 1 yoctoNEAR";
 
 struct Env {
     sandbox: near_sandbox::Sandbox,
@@ -125,11 +137,28 @@ impl Env {
         Ok(id)
     }
 
+    /// Call with the deposit the method expects (1 yocto for `ONE_YOCTO_METHODS`).
     async fn call(&self, who: &AccountId, method: &str, args: Value) -> R<TxResult> {
+        let deposit = if ONE_YOCTO_METHODS.contains(&method) {
+            NearToken::from_yoctonear(1)
+        } else {
+            NearToken::from_yoctonear(0)
+        };
+        self.call_with(who, method, args, deposit).await
+    }
+
+    async fn call_with(
+        &self,
+        who: &AccountId,
+        method: &str,
+        args: Value,
+        deposit: NearToken,
+    ) -> R<TxResult> {
         Ok(self
             .contract
             .call_function(method, args)
             .transaction()
+            .deposit(deposit)
             .with_signer(who.clone(), self.signer.clone())
             .send_to(&self.net)
             .await?)
@@ -209,6 +238,15 @@ fn pending_id(outcome: &Value) -> U64 {
     U64(outcome["id"].as_str().expect("id").parse().expect("u64"))
 }
 
+/// Assert the transaction failed and its error mentions `msg`.
+fn fails_with(res: TxResult, msg: &str) {
+    let err = format!("{:?}", res.assert_failure());
+    assert!(
+        err.contains(msg),
+        "expected failure containing {msg:?}, got: {err}"
+    );
+}
+
 fn rejected(reason: &str) -> Value {
     json!({"status": "rejected", "reason": reason})
 }
@@ -241,13 +279,14 @@ async fn init_sets_defaults() -> R {
     assert_eq!(env.spent_today().await?, NearToken::from_yoctonear(0));
     assert!(env.pending().await?.is_empty());
     // A second init is refused.
-    env.call(
-        &env.vault.clone(),
-        "new",
-        json!({"owner_id": env.owner, "registry_id": "registry.sandbox", "limits": null}),
-    )
-    .await?
-    .assert_failure();
+    let res = env
+        .call(
+            &env.vault.clone(),
+            "new",
+            json!({"owner_id": env.owner, "registry_id": "registry.sandbox", "limits": null}),
+        )
+        .await?;
+    fails_with(res, "The contract has already been initialized");
     Ok(())
 }
 
@@ -269,7 +308,7 @@ async fn owner_methods_reject_non_owner() -> R {
         ("approve", json!({"id": id})),
         ("deny", json!({"id": id})),
     ] {
-        env.call(&stranger, method, args).await?.assert_failure();
+        fails_with(env.call(&stranger, method, args).await?, NOT_OWNER);
     }
     // Nothing changed.
     assert!(!env.view::<bool>("is_paused", json!({})).await?);
@@ -327,12 +366,11 @@ async fn request_approval_requires_self_predecessor() -> R {
     let bob = env.account("bob").await?;
     // Another account (even the owner) cannot queue payments.
     let args = json!({"receiver": bob, "amount": ONE, "memo": "m", "reason": "r"});
-    env.call(&bob, "request_approval", args.clone())
-        .await?
-        .assert_failure();
-    env.owner_call("request_approval", args)
-        .await?
-        .assert_failure();
+    fails_with(
+        env.call(&bob, "request_approval", args.clone()).await?,
+        NOT_SELF,
+    );
+    fails_with(env.owner_call("request_approval", args).await?, NOT_SELF);
     assert!(env.pending().await?.is_empty());
 
     // The vault itself, through the agent's function-call key.
@@ -450,9 +488,10 @@ async fn approve_pays_and_counts_daily() -> R {
     assert_eq!(env.spent_today().await?, ONE);
     assert!(env.pending().await?.is_empty());
     // An approved id cannot be approved again.
-    env.owner_call("approve", json!({"id": id}))
-        .await?
-        .assert_failure();
+    fails_with(
+        env.owner_call("approve", json!({"id": id})).await?,
+        "no such pending payment",
+    );
     Ok(())
 }
 
@@ -474,6 +513,10 @@ async fn approve_rechecks_daily_cap() -> R {
         .owner_call("approve", json!({"id": id}))
         .await?
         .assert_success();
+    let ev = events(&res.logs(), "payment_rejected");
+    assert_eq!(ev.len(), 1, "logs: {:?}", res.logs());
+    assert_eq!(ev[0]["data"]["id"], json!(id));
+    assert_eq!(ev[0]["data"]["reason"], "over daily cap");
     assert_eq!(res.json::<Value>()?, rejected("over daily cap"));
     assert_eq!(env.balance(&bob).await?, before);
     assert_eq!(env.spent_today().await?, NearToken::from_millinear(4500));
@@ -523,9 +566,10 @@ async fn deny_removes() -> R {
     assert_eq!(pending[0].id, keep);
     assert_eq!(env.balance(&bob).await?, before);
     // Unknown id.
-    env.owner_call("deny", json!({"id": id}))
-        .await?
-        .assert_failure();
+    fails_with(
+        env.owner_call("deny", json!({"id": id})).await?,
+        "no such pending payment",
+    );
     Ok(())
 }
 
@@ -552,8 +596,85 @@ async fn withdraw_sends_to_owner() -> R {
         "vault lost {lost}"
     );
     // More than the vault holds is refused.
-    env.owner_call("withdraw", json!({"amount": NearToken::from_near(1000)}))
+    fails_with(
+        env.owner_call("withdraw", json!({"amount": NearToken::from_near(1000)}))
+            .await?,
+        "insufficient available balance",
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn withdraw_keeps_storage_stake() -> R {
+    let env = Env::new().await?;
+    // The whole account balance includes the stake locked for contract
+    // storage, so withdrawing all of it is refused.
+    let all = env.balance(&env.vault).await?;
+    fails_with(
+        env.owner_call("withdraw", json!({ "amount": all })).await?,
+        "insufficient available balance",
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn sensitive_owner_methods_require_one_yocto() -> R {
+    let env = Env::new().await?;
+    let bob = env.account("bob").await?;
+    let id = pending_id(&env.request_approval(&bob, ONE).await?);
+    let zero = NearToken::from_yoctonear(0);
+    let owner = env.owner.clone();
+    fails_with(
+        env.call_with(&owner, "approve", json!({"id": id}), zero)
+            .await?,
+        ONE_YOCTO_MSG,
+    );
+    fails_with(
+        env.call_with(&owner, "withdraw", json!({"amount": ONE}), zero)
+            .await?,
+        ONE_YOCTO_MSG,
+    );
+    assert_eq!(env.pending().await?.len(), 1);
+    // pause and deny stay deposit-free.
+    env.call_with(&owner, "pause", json!({}), zero)
         .await?
-        .assert_failure();
+        .assert_success();
+    env.call_with(&owner, "deny", json!({"id": id}), zero)
+        .await?
+        .assert_success();
+    Ok(())
+}
+
+#[tokio::test]
+async fn memo_and_reason_capped_at_280_bytes() -> R {
+    let env = Env::new().await?;
+    let bob = env.account("bob").await?;
+    let ok = "x".repeat(280);
+    let long = "x".repeat(281);
+    let amount = NearToken::from_millinear(10);
+    for (memo, reason, msg) in [
+        (&long, &ok, "memo exceeds 280 bytes"),
+        (&ok, &long, "reason exceeds 280 bytes"),
+    ] {
+        fails_with(
+            env.agent_call(
+                "request_approval",
+                json!({"receiver": bob, "amount": amount, "memo": memo, "reason": reason}),
+            )
+            .await?,
+            msg,
+        );
+    }
+    assert!(env.pending().await?.is_empty());
+    let res = env
+        .agent_call(
+            "request_approval",
+            json!({"receiver": bob, "amount": amount, "memo": ok, "reason": ok}),
+        )
+        .await?
+        .assert_success();
+    pending_id(&res.json()?);
+    let pending = env.pending().await?;
+    assert_eq!((pending[0].memo.len(), pending[0].reason.len()), (280, 280));
     Ok(())
 }
