@@ -1,6 +1,6 @@
 [package]
 name = "registry"
-description = "cargo-near-new-project-description"
+description = "Countersign registry: open, ownerless reports about bad NEAR accounts"
 version = "0.1.0"
 edition = "2024"
 resolver = "3"
@@ -47,6 +47,7 @@ near-api = "0.8"
 cargo-near-build = "0.11.0"
 tokio = { version = "1.12.0", features = ["full"] }
 testresult = "0.4.1"
+wasmparser = "0.263.0"
 
 # `cfg(near)` was introduced in `near-sdk` v5.27.0, and is expected cfg now
 [lints.rust.unexpected_cfgs]

@@ -1,276 +1,343 @@
-// Find NEAR documentation at https://docs.near.org
+//! Countersign registry: a shared, ownerless list of reports about bad NEAR
+//! accounts (spec §5.2).
+//!
+//! Anyone can report a target once, paying for the storage they use; reporters
+//! can withdraw and get that storage refunded; a target can attach a single
+//! rebuttal. There are no admin, owner or upgrade methods.
+
+pub mod events;
+pub mod types;
+
 use near_sdk::json_types::U64;
-use near_sdk::{AccountId, NearToken, PanicOnDefault, Promise, Timestamp, env, near, require};
+use near_sdk::store::{IterableMap, LookupMap};
+use near_sdk::{AccountId, NearToken, Promise, env, near, require};
 
-// Define the contract structure
+use crate::events::RegistryEvent;
+use crate::types::StorageKey;
+pub use crate::types::{Category, Rebuttal, Report, Summary};
+
+/// Minimum deposit attached to `report` / `rebut` (anti-spam gate).
+pub const MIN_DEPOSIT: NearToken = NearToken::from_millinear(10);
+/// Maximum note length in bytes for reports and rebuttals.
+pub const MAX_NOTE_BYTES: usize = 280;
+/// Maximum `tx_hash` length in bytes (base58 tx hashes are ~44 chars).
+pub const MAX_TX_HASH_BYTES: usize = 64;
+/// Upper bound on `get_reports` page size, to keep view gas bounded.
+pub const MAX_PAGE: u32 = 100;
+
 #[near(contract_state)]
-#[derive(PanicOnDefault)] // The contract is required to be initialized with `#[init]` functions
 pub struct Contract {
-    highest_bid: Bid,
-    auction_end_time: Timestamp,
-    auctioneer: AccountId,
-    is_claimed: bool,
+    /// target -> reporter -> report
+    reports: LookupMap<AccountId, IterableMap<AccountId, Report>>,
+    summaries: LookupMap<AccountId, Summary>,
+    rebuttals: LookupMap<AccountId, Rebuttal>,
 }
 
-// The Bid structure is used as function return value (JSON-serialized) and as part of the Contract
-// state (Borsh-serialized)
-#[near(serializers = [json, borsh])]
-#[derive(Clone)]
-pub struct Bid {
-    pub bidder: AccountId,
-    pub bid: NearToken,
-}
-
-// Implement the contract functions
-#[near]
-impl Contract {
-    /// Initializer function that one must call after the contract code is deployed to an account
-    /// for the first time, all other functions will fail to execute until the contract state is
-    /// initialized (thanks to PanicOnDefault derive above).
-    /// It is common to batch contract initialization in the same transaction as contract deployment.
-    /// Sometimes #[private] attribute can also be useful to guard the function to be callable only
-    /// by the account where the contract is deployed to.
-    #[init]
-    pub fn init(end_time: U64, auctioneer: AccountId) -> Self {
+impl Default for Contract {
+    fn default() -> Self {
         Self {
-            highest_bid: Bid {
-                bidder: env::current_account_id(),
-                bid: NearToken::from_yoctonear(1),
-            },
-            auction_end_time: end_time.into(),
-            is_claimed: false,
-            auctioneer,
+            reports: LookupMap::new(StorageKey::Reports),
+            summaries: LookupMap::new(StorageKey::Summaries),
+            rebuttals: LookupMap::new(StorageKey::Rebuttals),
         }
     }
+}
 
-    /// Bid function can be called by any account on blockchain to make a higher bid on the auction
-    #[payable]
-    pub fn bid(&mut self) -> Promise {
-        // Assert the auction is still ongoing
-        require!(
-            env::block_timestamp() < self.auction_end_time,
-            "Auction has ended"
-        );
+fn storage_cost(bytes: u64) -> NearToken {
+    env::storage_byte_cost().saturating_mul(u128::from(bytes))
+}
 
-        // Current bid
-        let bid = env::attached_deposit();
-        let bidder = env::predecessor_account_id();
-
-        // Last bid recorded by the contract
-        let Bid {
-            bidder: last_bidder,
-            bid: last_bid,
-        } = self.highest_bid.clone();
-
-        // Check if the deposit is higher than the current bid
-        require!(bid > last_bid, "You must place a higher bid");
-
-        // Update the highest bid
-        self.highest_bid = Bid { bidder, bid };
-
-        // Transfer tokens back to the last bidder.
-        //
-        // NOTE: The result of this Promise is not handled. If this transfer fails (for example,
-        // because `last_bidder` account was removed), the previous bidder may not be refunded even
-        // though `self.highest_bid` has already been updated. For production use, consider
-        // implementing a withdrawal pattern or adding a callback to handle transfer failures.
-        Promise::new(last_bidder).transfer(last_bid)
-    }
-
-    /// Claim function can be called by any account on blockchain to claim the auction and transfer
-    /// the tokens to the auctioneer
-    pub fn claim(&mut self) -> Promise {
-        // Assert the auction has ended
-        require!(
-            env::block_timestamp() > self.auction_end_time,
-            "Auction has not ended yet"
-        );
-
-        // Assert the auction has not been claimed yet
-        require!(!self.is_claimed, "Auction has already been claimed");
-        self.is_claimed = true;
-
-        // Transfer tokens to the auctioneer.
-        //
-        // NOTE: The result of this Promise is not handled. If this transfer fails (for example,
-        // because `last_bidder` account was removed), the previous bidder may not be refunded even
-        // though `self.highest_bid` has already been updated. For production use, consider
-        // implementing a withdrawal pattern or adding a callback to handle transfer failures.
-        Promise::new(self.auctioneer.clone()).transfer(self.highest_bid.bid)
-    }
-
-    /*
-     * The functions below are read-only functions that can be called without a transaction (through
-     * JSON RPC query call). They read the data from the contract local storage and return the
-     * highest bid, auction end time, auctioneer, and claimed status
-     */
-
-    pub fn get_highest_bid(&self) -> Bid {
-        self.highest_bid.clone()
-    }
-
-    pub fn get_auction_end_time(&self) -> U64 {
-        self.auction_end_time.into()
-    }
-
-    pub fn get_auctioneer(&self) -> AccountId {
-        self.auctioneer.clone()
-    }
-
-    pub fn is_already_claimed(&self) -> bool {
-        self.is_claimed
+fn refund(to: &AccountId, amount: NearToken) {
+    if !amount.is_zero() {
+        Promise::new(to.clone()).transfer(amount).detach();
     }
 }
 
-/*
- * The rest of this file holds the inline tests for the code above
- * Learn more about Rust tests: https://doc.rust-lang.org/book/ch11-01-writing-tests.html
- */
+fn require_note(note: &str) {
+    require!(note.len() <= MAX_NOTE_BYTES, "note exceeds 280 bytes");
+}
+
+#[near]
+impl Contract {
+    /// Report `target`. Attach at least 0.01 NEAR; the measured storage cost
+    /// is kept and the rest refunded.
+    #[payable]
+    pub fn report(
+        &mut self,
+        target: AccountId,
+        category: Category,
+        tx_hash: Option<String>,
+        note: String,
+    ) {
+        let reporter = env::predecessor_account_id();
+        let deposit = env::attached_deposit();
+        require!(deposit >= MIN_DEPOSIT, "attach at least 0.01 NEAR");
+        require!(target != reporter, "cannot report yourself");
+        require_note(&note);
+        if let Some(h) = &tx_hash {
+            require!(h.len() <= MAX_TX_HASH_BYTES, "tx_hash exceeds 64 bytes");
+        }
+
+        let before = env::storage_usage();
+        let now = U64(env::block_timestamp());
+
+        let inner = self.reports.entry(target.clone()).or_insert_with(|| {
+            IterableMap::new(StorageKey::TargetReports {
+                target_hash: env::sha256(target.as_bytes()),
+            })
+        });
+        require!(
+            !inner.contains_key(&reporter),
+            "already reported this target"
+        );
+        inner.insert(
+            reporter.clone(),
+            Report {
+                reporter: reporter.clone(),
+                category,
+                tx_hash,
+                note,
+                created_at: now,
+            },
+        );
+        // Write the inner map's entries now so storage_usage reflects them.
+        inner.flush();
+
+        let mut summary = self.summaries.get(&target).cloned().unwrap_or_default();
+        summary.reports = summary.reports.saturating_add(1);
+        if summary.first_seen.is_none() {
+            summary.first_seen = Some(now);
+        }
+        summary.last_seen = Some(now);
+        self.summaries.insert(target.clone(), summary);
+
+        self.reports.flush();
+        self.summaries.flush();
+
+        let used = env::storage_usage().saturating_sub(before);
+        let cost = storage_cost(used);
+        require!(
+            deposit >= cost,
+            format!(
+                "attach at least {} yoctoNEAR for storage",
+                cost.as_yoctonear()
+            )
+        );
+        refund(&reporter, deposit.saturating_sub(cost));
+
+        RegistryEvent::ReportAdded {
+            target,
+            reporter,
+            category,
+        }
+        .emit();
+    }
+
+    /// Remove the caller's report about `target` and refund the storage it
+    /// released.
+    pub fn withdraw_report(&mut self, target: AccountId) {
+        let reporter = env::predecessor_account_id();
+        let before = env::storage_usage();
+
+        let now_empty = match self.reports.get_mut(&target) {
+            Some(inner) => {
+                require!(inner.remove(&reporter).is_some(), "no report to withdraw");
+                inner.flush();
+                inner.is_empty()
+            }
+            None => env::panic_str("no report to withdraw"),
+        };
+        if now_empty {
+            self.reports.remove(&target);
+        }
+
+        let mut summary = self.summaries.get(&target).cloned().unwrap_or_default();
+        summary.reports = summary.reports.saturating_sub(1);
+        if summary.reports == 0 {
+            // Timestamps are not recomputed on partial withdrawals (that would
+            // need a scan over all reports); they are cleared when none remain.
+            summary.first_seen = None;
+            summary.last_seen = None;
+        }
+        if summary.reports == 0 && !summary.rebutted {
+            self.summaries.remove(&target);
+        } else {
+            self.summaries.insert(target.clone(), summary);
+        }
+
+        self.reports.flush();
+        self.summaries.flush();
+
+        let released = before.saturating_sub(env::storage_usage());
+        refund(&reporter, storage_cost(released));
+
+        RegistryEvent::ReportWithdrawn { target, reporter }.emit();
+    }
+
+    /// Store or replace the caller's rebuttal about reports against them.
+    /// Attach at least 0.01 NEAR; storage growth is kept, the rest refunded
+    /// (plus any storage released when the new note is shorter).
+    #[payable]
+    pub fn rebut(&mut self, note: String) {
+        let target = env::predecessor_account_id();
+        let deposit = env::attached_deposit();
+        require!(deposit >= MIN_DEPOSIT, "attach at least 0.01 NEAR");
+        require_note(&note);
+
+        let before = env::storage_usage();
+        self.rebuttals.insert(
+            target.clone(),
+            Rebuttal {
+                note,
+                created_at: U64(env::block_timestamp()),
+            },
+        );
+        let mut summary = self.summaries.get(&target).cloned().unwrap_or_default();
+        summary.rebutted = true;
+        self.summaries.insert(target.clone(), summary);
+
+        self.rebuttals.flush();
+        self.summaries.flush();
+
+        let after = env::storage_usage();
+        let to_refund = if after >= before {
+            let cost = storage_cost(after.saturating_sub(before));
+            require!(
+                deposit >= cost,
+                format!(
+                    "attach at least {} yoctoNEAR for storage",
+                    cost.as_yoctonear()
+                )
+            );
+            deposit.saturating_sub(cost)
+        } else {
+            deposit.saturating_add(storage_cost(before.saturating_sub(after)))
+        };
+        refund(&target, to_refund);
+
+        RegistryEvent::RebuttalAdded { target }.emit();
+    }
+
+    pub fn get_summary(&self, target: AccountId) -> Summary {
+        self.summaries.get(&target).cloned().unwrap_or_default()
+    }
+
+    /// Reports about `target` in insertion order (until a withdrawal swaps
+    /// the last entry into the removed slot). `limit` is capped at 100.
+    pub fn get_reports(&self, target: AccountId, from_index: u32, limit: u32) -> Vec<Report> {
+        let Some(inner) = self.reports.get(&target) else {
+            return vec![];
+        };
+        inner
+            .values()
+            .skip(from_index as usize)
+            .take(limit.min(MAX_PAGE) as usize)
+            .cloned()
+            .collect()
+    }
+
+    pub fn get_rebuttal(&self, target: AccountId) -> Option<Rebuttal> {
+        self.rebuttals.get(&target).cloned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use near_sdk::json_types::U64;
-    use near_sdk::test_utils::{VMContextBuilder, accounts};
-    use near_sdk::{AccountId, testing_env};
+    use near_sdk::test_utils::{VMContextBuilder, get_logs};
+    use near_sdk::testing_env;
 
-    fn get_context(predecessor_account_id: AccountId) -> VMContextBuilder {
-        let mut builder = VMContextBuilder::new();
-        builder
-            .current_account_id(accounts(0))
-            .signer_account_id(predecessor_account_id.clone())
-            .predecessor_account_id(predecessor_account_id);
-        builder
+    fn ctx(who: &str, deposit: NearToken) {
+        ctx_at(who, deposit, env::storage_usage());
+    }
+
+    /// `testing_env!` resets storage usage to the context's value, so carry it
+    /// over explicitly between calls.
+    fn ctx_at(who: &str, deposit: NearToken, storage_usage: u64) {
+        testing_env!(
+            VMContextBuilder::new()
+                .predecessor_account_id(who.parse().unwrap())
+                .attached_deposit(deposit)
+                .block_timestamp(1_000)
+                .storage_usage(storage_usage)
+                .build()
+        );
     }
 
     #[test]
-    fn init_contract() {
-        let end_time: U64 = U64::from(1000);
-        let alice: AccountId = "alice.near".parse().unwrap();
-        let contract = Contract::init(end_time, alice.clone());
+    fn report_storage_is_measured_and_fully_released_on_withdraw() {
+        let mut c = Contract::default();
+        ctx("alice.near", MIN_DEPOSIT);
+        let base = env::storage_usage();
+        c.report(
+            "bad.near".parse().unwrap(),
+            Category::Drainer,
+            Some("h".repeat(44)),
+            "n".repeat(280),
+        );
+        let used = env::storage_usage() - base;
+        // The 280-byte note and the inner map entry must be counted, which
+        // only happens if the nested collection was flushed before measuring.
+        assert!(used > 400, "measured only {used} bytes");
+        let logs = get_logs();
+        assert!(logs.iter().any(|l| l.starts_with("EVENT_JSON:")
+            && l.contains("\"event\":\"report_added\"")
+            && l.contains("\"category\":\"drainer\"")));
 
-        let default_bid = contract.get_highest_bid();
-        assert_eq!(default_bid.bidder, env::current_account_id());
-        assert_eq!(default_bid.bid, NearToken::from_yoctonear(1));
-
-        let auction_end_time = contract.get_auction_end_time();
-        assert_eq!(auction_end_time, end_time);
-
-        let auctioneer = contract.get_auctioneer();
-        assert_eq!(auctioneer, alice);
-
-        assert!(!contract.is_already_claimed());
+        ctx("alice.near", NearToken::from_yoctonear(0));
+        c.withdraw_report("bad.near".parse().unwrap());
+        assert_eq!(env::storage_usage(), base, "withdraw must free all bytes");
+        assert_eq!(
+            c.get_summary("bad.near".parse().unwrap()),
+            Summary::default()
+        );
+        assert!(
+            get_logs()
+                .iter()
+                .any(|l| l.contains("\"event\":\"report_withdrawn\""))
+        );
     }
 
     #[test]
-    fn bid_successfully() {
-        let auctioneer: AccountId = "auctioneer.near".parse().unwrap();
-        let alice: AccountId = "alice.near".parse().unwrap();
-        let end_time: U64 = U64::from(1000);
-        let mut contract = Contract::init(end_time, auctioneer.clone());
-
-        // Set block_timestamp before auction end time
-        let mut context = get_context(alice.clone());
-        context.block_timestamp(500);
-        context.attached_deposit(NearToken::from_near(2));
-        testing_env!(context.build());
-
-        // Bid should succeed
-        let _ = contract.bid();
-
-        // Verify highest bid is updated
-        let highest_bid = contract.get_highest_bid();
-        assert_eq!(highest_bid.bidder, alice);
-        assert_eq!(highest_bid.bid, NearToken::from_near(2));
+    fn partial_withdraw_keeps_timestamps_and_rebuttal_keeps_summary() {
+        let mut c = Contract::default();
+        let bad: AccountId = "bad.near".parse().unwrap();
+        for who in ["a.near", "b.near"] {
+            ctx(who, MIN_DEPOSIT);
+            c.report(bad.clone(), Category::Scam, None, "x".into());
+        }
+        ctx("bad.near", MIN_DEPOSIT);
+        c.rebut("no".into());
+        ctx("a.near", NearToken::from_yoctonear(0));
+        c.withdraw_report(bad.clone());
+        let s = c.get_summary(bad.clone());
+        assert_eq!((s.reports, s.rebutted), (1, true));
+        assert_eq!(s.first_seen, Some(U64(1_000)));
+        ctx("b.near", NearToken::from_yoctonear(0));
+        c.withdraw_report(bad.clone());
+        let s = c.get_summary(bad.clone());
+        assert_eq!(
+            s,
+            Summary {
+                reports: 0,
+                first_seen: None,
+                last_seen: None,
+                rebutted: true
+            }
+        );
+        assert!(c.get_reports(bad, 0, 10).is_empty());
     }
 
     #[test]
-    #[should_panic(expected = "Auction has ended")]
-    fn bid_after_auction_ended() {
-        let auctioneer: AccountId = "auctioneer.near".parse().unwrap();
-        let alice: AccountId = "alice.near".parse().unwrap();
-        let end_time: U64 = U64::from(1000);
-        let mut contract = Contract::init(end_time, auctioneer.clone());
-
-        // Set block_timestamp after auction end time
-        let mut context = get_context(alice.clone());
-        context.block_timestamp(2000);
-        context.attached_deposit(NearToken::from_near(2));
-        testing_env!(context.build());
-
-        // Bid should panic
-        let _ = contract.bid();
-    }
-
-    #[test]
-    #[should_panic(expected = "You must place a higher bid")]
-    fn bid_lower_than_current() {
-        let auctioneer: AccountId = "auctioneer.near".parse().unwrap();
-        let alice: AccountId = "alice.near".parse().unwrap();
-        let end_time: U64 = U64::from(1000);
-        let mut contract = Contract::init(end_time, auctioneer.clone());
-
-        // Set block_timestamp before auction end time
-        let mut context = get_context(alice.clone());
-        context.block_timestamp(500);
-        // Default bid is 1 yoctoNEAR, so bidding with 0 or less should fail
-        // But we'll bid with the same amount (1 yoctoNEAR) which should also fail
-        context.attached_deposit(NearToken::from_yoctonear(1));
-        testing_env!(context.build());
-
-        // Bid should panic
-        let _ = contract.bid();
-    }
-
-    #[test]
-    fn claim_after_auction_ended() {
-        let auctioneer: AccountId = "auctioneer.near".parse().unwrap();
-        let end_time: U64 = U64::from(1000);
-        let mut contract = Contract::init(end_time, auctioneer.clone());
-
-        // Set block_timestamp after auction end time
-        let mut context = get_context(auctioneer.clone());
-        context.block_timestamp(2000);
-        testing_env!(context.build());
-
-        // Claim should succeed
-        let _ = contract.claim();
-
-        // Verify auction is marked as claimed
-        assert!(contract.is_already_claimed());
-    }
-
-    #[test]
-    #[should_panic(expected = "Auction has not ended yet")]
-    fn claim_before_auction_ended() {
-        let auctioneer: AccountId = "auctioneer.near".parse().unwrap();
-        let end_time: U64 = U64::from(1000);
-        let mut contract = Contract::init(end_time, auctioneer.clone());
-
-        // Set block_timestamp before auction end time
-        let mut context = get_context(auctioneer.clone());
-        context.block_timestamp(500);
-        testing_env!(context.build());
-
-        // Claim should panic
-        let _ = contract.claim();
-    }
-
-    #[test]
-    #[should_panic(expected = "Auction has already been claimed")]
-    fn claim_twice() {
-        let auctioneer: AccountId = "auctioneer.near".parse().unwrap();
-        let end_time: U64 = U64::from(1000);
-        let mut contract = Contract::init(end_time, auctioneer.clone());
-
-        // Set block_timestamp after auction end time
-        let mut context = get_context(auctioneer.clone());
-        context.block_timestamp(2000);
-        testing_env!(context.build());
-
-        // First claim should succeed
-        let _ = contract.claim();
-
-        // Second claim should panic
-        let _ = contract.claim();
+    #[should_panic(expected = "tx_hash exceeds 64 bytes")]
+    fn long_tx_hash_rejected() {
+        let mut c = Contract::default();
+        ctx("alice.near", MIN_DEPOSIT);
+        c.report(
+            "bad.near".parse().unwrap(),
+            Category::Other,
+            Some("h".repeat(65)),
+            "x".into(),
+        );
     }
 }
