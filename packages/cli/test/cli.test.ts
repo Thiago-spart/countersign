@@ -1,14 +1,14 @@
 import { execFile, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ReceiptLog, guardedAgent, VaultClient, AGENT_ALLOWANCE, AGENT_METHODS } from "@countersign/sdk";
 import { startSandbox, type SandboxEnv } from "@countersign/sdk/sandbox";
-import { KeyPair } from "near-api-js";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { Account, JsonRpcProvider, KeyPair } from "near-api-js";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { formatAllowance, formatFreeBalance } from "../src/format.js";
-import { runSetup } from "../src/commands/setup.js";
+import { runSetup, verifyVaultKeys, type AccessKeyEntry } from "../src/commands/setup.js";
 
 const TSX = fileURLToPath(new URL("../../../node_modules/.bin/tsx", import.meta.url));
 const MAIN = fileURLToPath(new URL("../src/main.ts", import.meta.url));
@@ -194,7 +194,45 @@ describe("countersign setup (against the sandbox)", { timeout: 90_000 }, () => {
       recoveryDir: join(dir, "recovery"),
       out: (l: string) => out.push(l),
     };
-    return { ownerId, ownerKey, out, base };
+    const vaultId = `vault.${ownerId}`;
+    const recovery = { key: join(base.recoveryDir, `${vaultId}.key`), env: join(base.recoveryDir, `${vaultId}.env`) };
+    return { ownerId, ownerKey, out, base, dir, vaultId, recovery };
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // Secret-safe assertions: compare booleans or public keys so a failing test never prints a private key.
+  const contains = (hay: string, needle: string) => hay.includes(needle);
+  const looksSecret = (text: string) => /(?:ed25519|secp256k1):[1-9A-HJ-NP-Za-km-z]{80,}/.test(text);
+  function readEnv(path: string): Record<string, string> {
+    const text = readFileSync(path, "utf8");
+    return Object.fromEntries(text.split("\n").filter((l) => !l.startsWith("#") && l.includes("=")).map((l) => l.split(/=(.*)/s).slice(0, 2)));
+  }
+  function publicKeyOf(secret: string | undefined): string {
+    try {
+      return KeyPair.fromString(secret as never).getPublicKey().toString();
+    } catch {
+      return "<not a key>";
+    }
+  }
+  async function vaultKeys(vaultId: string) {
+    return (await env.provider.viewAccessKeyList({ accountId: vaultId })).keys as unknown as AccessKeyEntry[];
+  }
+  /** Makes the vault's provisioning batch (signer = vault, 4 actions) fail on the client side. */
+  function injectBatchFault(vaultId: string, mode: "after-landing" | "before-sending") {
+    const original = Account.prototype.signAndSendTransaction;
+    const sends: number[] = [];
+    vi.spyOn(Account.prototype, "signAndSendTransaction").mockImplementation(async function (this: Account, args) {
+      if (this.accountId === vaultId && args.actions.length === 4) {
+        sends.push(1);
+        if (mode === "after-landing") await original.call(this, args);
+        throw new Error("TimeoutError: the RPC did not answer in time (injected)");
+      }
+      return original.call(this, args);
+    });
+    return sends;
   }
 
   it("creates vault.<owner> with one FC key, no full-access key, and writes .env (0600)", async () => {
@@ -224,11 +262,11 @@ describe("countersign setup (against the sandbox)", { timeout: 90_000 }, () => {
     expect(vars.COUNTERSIGN_NETWORK).toBe("sandbox");
     expect(KeyPair.fromString(vars.COUNTERSIGN_AGENT_KEY as never).getPublicKey().toString()).toBe(keys[0]!.public_key);
     // The owner key never lands in the agent's .env; no key is ever printed.
-    expect(text).not.toContain(ownerKey);
+    expect(contains(text, ownerKey)).toBe(false);
     const printed = out.join("\n");
-    expect(printed).not.toContain(ownerKey);
-    expect(printed).not.toContain(vars.COUNTERSIGN_AGENT_KEY!);
-    expect(printed).not.toMatch(/ed25519:[1-9A-HJ-NP-Za-km-z]{80,}/);
+    expect(contains(printed, ownerKey)).toBe(false);
+    expect(contains(printed, vars.COUNTERSIGN_AGENT_KEY!)).toBe(false);
+    expect(looksSecret(printed)).toBe(false);
 
     // The configured agent key works end to end.
     const c = { ...env.config, vaultId: res.vaultId, agentKey: vars.COUNTERSIGN_AGENT_KEY, ownerId, ownerKey };
@@ -272,22 +310,148 @@ describe("countersign setup (against the sandbox)", { timeout: 90_000 }, () => {
     await expect(runSetup({ ...b2 })).rejects.toThrow(/aborted/i);
   });
 
-  it("keeps a 0600 recovery key until the batch succeeds, then deletes it", async () => {
-    const { ownerId, ownerKey, base } = await setupEnv();
-    const recovery = join(base.recoveryDir, `vault.${ownerId}.key`);
+  it("saves BOTH generated keys (0600, in a 0700 dir) before the first transaction", async () => {
+    const { vaultId, base, recovery, out } = await setupEnv();
+    let seen: { key: boolean; env: boolean; keyMode: number; envMode: number; dirMode: number } | undefined;
+    await expect(
+      runSetup({
+        ...base,
+        confirm: async () => {
+          seen = {
+            key: existsSync(recovery.key),
+            env: existsSync(recovery.env),
+            keyMode: existsSync(recovery.key) ? statSync(recovery.key).mode & 0o777 : -1,
+            envMode: existsSync(recovery.env) ? statSync(recovery.env).mode & 0o777 : -1,
+            dirMode: statSync(base.recoveryDir).mode & 0o777,
+          };
+          return false; // abort before anything is sent
+        },
+      }),
+    ).rejects.toThrow(/aborted/);
+    expect(seen).toEqual({ key: true, env: true, keyMode: 0o600, envMode: 0o600, dirMode: 0o700 });
+    // Nothing was sent, so both are gone again.
+    expect(existsSync(recovery.key)).toBe(false);
+    expect(existsSync(recovery.env)).toBe(false);
+    await expect(env.provider.viewAccount({ accountId: vaultId })).rejects.toThrow();
+    expect(looksSecret(out.join("\n"))).toBe(false);
+  });
+
+  it("refuses an env path it could not write later, before any prompt, file or transaction", async () => {
+    const { vaultId, base, dir } = await setupEnv();
+    const prompts: string[] = [];
+    const bad = { ...base, envPath: join(dir, "no-such-dir", ".env"), confirm: async (q: string) => (prompts.push(q), true) };
+    await expect(runSetup(bad)).rejects.toThrow(/no-such-dir/);
+    expect(prompts).toEqual([]);
+    expect(existsSync(base.recoveryDir)).toBe(false);
+    await expect(env.provider.viewAccount({ accountId: vaultId })).rejects.toThrow();
+  });
+
+  it("refuses a dangling env symlink before funding or prompting", async () => {
+    const { vaultId, base, dir } = await setupEnv();
+    symlinkSync(join(dir, "missing-env-target"), base.envPath);
+    const prompts: string[] = [];
+    await expect(runSetup({ ...base, confirm: async (q) => (prompts.push(q), true) })).rejects.toThrow();
+    expect(prompts).toEqual([]);
+    expect(existsSync(base.recoveryDir)).toBe(false);
+    await expect(env.provider.viewAccount({ accountId: vaultId })).rejects.toThrow();
+  });
+
+  it("keeps both recovery files when the batch is declined and cleanup is declined", async () => {
+    const { vaultId, base, recovery, out } = await setupEnv();
     let n = 0;
     // Say yes to the account creation, no to the batch (and no to the cleanup).
     await expect(runSetup({ ...base, confirm: async () => ++n === 1 })).rejects.toThrow(/aborted|setup failed/);
-    expect(existsSync(recovery)).toBe(true);
-    expect(statSync(recovery).mode & 0o777).toBe(0o600);
-    expect(readFileSync(recovery, "utf8")).toMatch(/^ed25519:/);
-    expect(await env.provider.viewAccount({ accountId: `vault.${ownerId}` })).toBeTruthy(); // funded, key recoverable
+    for (const p of [recovery.key, recovery.env]) {
+      expect(existsSync(p)).toBe(true);
+      expect(statSync(p).mode & 0o777).toBe(0o600);
+    }
+    // The .key file still controls the funded vault: it is the vault's only (full-access) key.
+    const keys = await vaultKeys(vaultId);
+    expect(keys.map((k) => k.public_key)).toEqual([publicKeyOf(readFileSync(recovery.key, "utf8").trim())]);
+    expect(keys[0]!.access_key.permission).toBe("FullAccess");
     expect(existsSync(base.envPath)).toBe(false);
-    void ownerKey;
+    expect(looksSecret(out.join("\n"))).toBe(false);
     // A successful run leaves no recovery file.
     const ok = await setupEnv();
     await runSetup({ ...ok.base, confirm: async () => true });
-    expect(existsSync(join(ok.base.recoveryDir, `vault.${ok.ownerId}.key`))).toBe(false);
+    expect(existsSync(ok.recovery.key)).toBe(false);
+    expect(existsSync(ok.recovery.env)).toBe(false);
+  });
+
+  it("batch lands but the RPC response is lost: reconciles on-chain state and finishes", async () => {
+    const { vaultId, base, recovery, out } = await setupEnv();
+    const sends = injectBatchFault(vaultId, "after-landing");
+    const prompts: string[] = [];
+    const res = await runSetup({ ...base, confirm: async (q) => (prompts.push(q), true) });
+    expect(sends.length).toBe(1);
+    expect(prompts.length).toBe(2); // no offer to delete a vault whose full-access key is gone
+    const keys = await vaultKeys(vaultId);
+    expect(verifyVaultKeys(keys, vaultId, res.agentPublicKey)).toBeNull();
+    expect(publicKeyOf(readEnv(base.envPath).COUNTERSIGN_AGENT_KEY)).toBe(res.agentPublicKey);
+    expect(existsSync(recovery.key)).toBe(false);
+    expect(existsSync(recovery.env)).toBe(false);
+    expect(out.join("\n")).toMatch(/landed/);
+    expect(looksSecret(out.join("\n"))).toBe(false);
+  });
+
+  it("batch result unknown and the key list unreadable: no deletion offered, both recovery files kept", async () => {
+    const { vaultId, base, recovery } = await setupEnv();
+    injectBatchFault(vaultId, "after-landing");
+    vi.spyOn(JsonRpcProvider.prototype, "viewAccessKeyList").mockRejectedValue(new Error("RPC unavailable (injected)"));
+    const prompts: string[] = [];
+    const err = await runSetup({ ...base, confirm: async (q) => (prompts.push(q), true) }).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(prompts.length).toBe(2);
+    const msg = (err as Error).message;
+    expect(msg).toMatch(/could not tell/);
+    expect(contains(msg, recovery.env)).toBe(true);
+    expect(contains(msg, recovery.key)).toBe(true);
+    expect(looksSecret(msg)).toBe(false);
+    expect(existsSync(recovery.key)).toBe(true);
+    expect(existsSync(recovery.env)).toBe(true);
+    expect(existsSync(base.envPath)).toBe(false);
+    vi.restoreAllMocks();
+    // The batch did land: the recovery .env is the working agent config.
+    const agentPk = publicKeyOf(readEnv(recovery.env).COUNTERSIGN_AGENT_KEY);
+    expect(verifyVaultKeys(await vaultKeys(vaultId), vaultId, agentPk)).toBeNull();
+  });
+
+  it("batch not landed (RPC error before sending): says so, and the offered cleanup deletes the vault", async () => {
+    const { ownerId, vaultId, base, recovery } = await setupEnv();
+    injectBatchFault(vaultId, "before-sending");
+    const prompts: string[] = [];
+    const err = await runSetup({ ...base, confirm: async (q) => (prompts.push(q), true) }).catch((e: Error) => e);
+    expect((err as Error).message).toMatch(/setup failed/);
+    expect(prompts.length).toBe(3);
+    expect(prompts[2]).toMatch(/Delete vault\./);
+    await expect(env.provider.viewAccount({ accountId: vaultId })).rejects.toThrow(); // deleted, balance returned
+    expect(existsSync(recovery.key)).toBe(false);
+    expect(existsSync(recovery.env)).toBe(false);
+    expect(existsSync(base.envPath)).toBe(false);
+    void ownerId;
+  });
+
+  it("writing the final env file fails after the batch landed: keeps the recovery env, names it, never overwrites", async () => {
+    const { vaultId, base, recovery, out } = await setupEnv();
+    let n = 0;
+    const err = await runSetup({
+      ...base,
+      confirm: async () => {
+        // Something else creates the env file while the batch is being confirmed.
+        if (++n === 2) writeFileSync(base.envPath, "KEEP=1\n");
+        return true;
+      },
+    }).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    const msg = (err as Error).message;
+    expect(contains(msg, recovery.env)).toBe(true);
+    expect(looksSecret(msg) || looksSecret(out.join("\n"))).toBe(false);
+    expect(readFileSync(base.envPath, "utf8")).toBe("KEEP=1\n");
+    expect(statSync(recovery.env).mode & 0o777).toBe(0o600);
+    // The recovery env holds the agent key the vault actually has.
+    const vars = readEnv(recovery.env);
+    expect(vars.COUNTERSIGN_VAULT_ID).toBe(vaultId);
+    expect(verifyVaultKeys(await vaultKeys(vaultId), vaultId, publicKeyOf(vars.COUNTERSIGN_AGENT_KEY))).toBeNull();
   });
 
   it("refuses mainnet", async () => {

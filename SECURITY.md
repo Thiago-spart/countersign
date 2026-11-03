@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Open an issue on this repository. The contracts are deployed on testnet only; nothing holds mainnet funds.
+Open an issue on this repository. This repository verifies local sandbox deployments; no verified public testnet deployment is recorded yet. Mainnet signing is disabled in v1.
 
 ## Scope
 
@@ -15,14 +15,14 @@ The off-chain scorer (`packages/core`) and SDK are not covered by this audit; th
 
 Method: the `near-contract-audit` checklist (its 14 detectors in `.claude/skills/near-contract-audit/references/`), applied by hand to every public method and callback, followed by a manual review of business logic, access control, economic attacks and cross-contract calls. No automated NEAR static analyzer was run. The auditor is the same AI coding agent (Claude Code) that wrote most of the code; treat this as a self-review, not an independent audit.
 
-Result: **no High or Medium findings.** Three Low findings were fixed with tests, and two Info items were hardened after the final review (I-2, I-10). The remaining Low and Info items are accepted and listed below.
+The initial review reported no High or Medium findings. A subsequent Codex review identified a High finding in the vault and two Medium findings in the off-chain code; these are recorded in the follow-up section below. Three earlier Low findings were fixed with tests, and two Info items were hardened after the initial review (I-2, I-10). The remaining Low and Info items are accepted and listed below.
 
 ### Detector checklist
 
 | Severity | Detector | Result |
 |---|---|---|
 | High | non-private-callback | Pass. `on_registry_summary`, `on_transfer_done`, `on_report_done` are `#[private]`; `new` is `#[init] #[private]`. Because the agent signs as the vault, `#[private]` alone doesn't keep the agent out; see I-10. |
-| High | reentrancy | Pass. `pay` and `report` reserve against the daily cap before the cross-contract call; callbacks release the reservation on every non-paid branch. `approve` removes the pending entry and reserves before transferring. `on_registry_summary` re-checks the balance before transferring. |
+| High | reentrancy | `pay` and `report` reserve against the daily cap before the cross-contract call; callbacks release the reservation on every non-paid branch. `approve` removes the pending entry and reserves before transferring. Follow-up H-1 fixed a missing pause re-check in `on_registry_summary`, which now checks both pause and balance before transferring. |
 | High | incorrect-argument-or-return-types | Pass. Amounts are `NearToken` (JSON string), ids and timestamps `U64`. Native `u32` only for counts (`reports`, `registry_pending_threshold`), `u32` pagination, and `u64` day numbers (~20,000) in private callback args. |
 | High | unsaved-changes | Pass. `near_sdk::store` collections are written back at the end of each call. Where storage is measured mid-call, the registry flushes the nested map and outer maps first. |
 | High | owner-check | Pass. Every owner method calls `require_owner`; every agent method calls `require_self` (predecessor = the vault). Sandbox tests call each with a stranger. |
@@ -71,6 +71,18 @@ Found in code review while the contracts were written; each has tests in `contra
 | `withdraw` could try to send the storage stake and fail with `LackBalanceForState`. Now limited to the balance above the stake. | `withdraw_keeps_storage_stake` · same commit |
 | NEP-297 events used a generic standard name. Now `standard: "countersign"`, `version: "1.0.0"`. Report storage was slimmed (reporter not stored twice) so the worst-case first report fits the 0.01 NEAR forward. | `report_storage_is_measured_and_fully_released_on_withdraw`, `worst_case_first_report_fits_min_deposit` · "fix(registry): countersign event standard, slimmer report storage, test wrapper" |
 
+## Follow-up review (2026-11-03)
+
+Codex reproduced the first two findings with separate temporary probes and reviewed Claude Code's fixes. Claude Code workers wrote regression tests, observed the failures, then implemented the fixes. Follow-up review also exercised additional indexer-lag and env-path cases. This remains an AI-assisted review, not an independent professional audit. Verification includes Rust Clippy with warnings denied, contract tests, TypeScript tests, typechecking and the sandbox attack suite.
+
+| ID | Severity | Area | Finding and resolution |
+|---|---|---|---|
+| H-1 | High | vault | `pay` could start a registry read, the owner could pause, and `on_registry_summary` would still schedule a transfer or queue the payment. **Fixed:** the callback rechecks pause after its promise-result guard, releases the reservation and returns `Rejected("paused")` before either action. Tests: `pause_during_registry_read_rejects_clean_payment`, `pause_during_registry_read_does_not_enqueue`, `pause_during_registry_read_with_failed_registry`, `unpaused_summary_still_pays_or_queues`. A transfer dispatched before the pause cannot be recalled. |
+| M-1 | Medium | core | A changed live RPC code hash could reuse a ten-minute cached deployment timestamp and score zero code-change points. **Fixed:** deployment freshness is associated with the last observed code hash. Hash changes bypass the cached deployment list and retain a conservative observation time when the indexer lags. Tests cover changed hashes, client recreation, indexer lag and returning to a previous hash in `nearblocks.test.ts` and `rpc.test.ts`. No scoring weights or thresholds changed. |
+| M-2 | Medium | CLI setup | The temporary full-access key was persisted before provisioning, but the agent key existed only in memory until after that key-deleting batch. A crash, lost response or final env write error could lose the only working agent key. **Fixed:** both generated keys and recovery metadata are saved privately before funding; uncertain batch results are reconciled against on-chain keys; recovery copies stay until the final env file is written, read back and permissions verified. Env-path errors, including dangling symlinks, fail before funding. Real-sandbox tests inject a lost batch response, unreadable key list and final env write failure, and cover declined/failed batches and cleanup. See `docs/limits.md#setup-recovery`. |
+
+The cache fix cannot detect an unobserved redeployment before the first recorded code hash, or a complete sequence of hash changes between checks that ends at the original hash. Cache-state persistence is best effort; an unwritable or deleted cache loses earlier observations. On-chain caps and registry checks remain the enforcement floor.
+
 ## Off-chain safety properties (SDK, CLI, MCP)
 
 These are enforced in TypeScript and covered by `pnpm test` and `pnpm attacks`:
@@ -82,3 +94,9 @@ These are enforced in TypeScript and covered by `pnpm test` and `pnpm attacks`:
 - `setup` deletes the vault's full-access key in the same batch that deploys the code, initializes it and adds the agent key, then verifies that exactly one function-call key is left.
 
 See `docs/limits.md` for what Countersign does not protect against.
+
+## Historical test keys
+
+Older revisions of `scripts/smoke-sandbox.ts` contain the well-known local `near-sandbox` genesis private key. Older revisions of `packages/sdk/test/network.test.ts` contain literal keys used in offline network-guard tests. The network tests now generate their keys at runtime. These historical constants remain visible to history scanners; removing a literal from the current tree does not remove it from history.
+
+The review found no evidence that these test constants were production credentials. Never reuse them for a public-network account. Review scanner matches by file and use, without printing key values: public keys also match a broad `ed25519:` pattern. If any historical key is found to have been used outside the local tests, revoke it on every affected account before considering a history rewrite. A rewrite requires explicit owner approval and does not revoke a leaked key.
