@@ -64,7 +64,7 @@ On testnet and mainnet, existence comes from RPC (`view_account`) and age, activ
 ## Payments and networks
 
 - NEAR only. No fungible tokens (USDC, USDT, ...) or NFTs in v1.
-- Mainnet is read-only. `check` works on mainnet; `safeTransfer`, `report` and `setup` refuse before building or signing anything.
+- Mainnet is read-only. `check` works on mainnet; `safeTransfer`, `report` and `setup` refuse before building or signing anything. Before the first signature they also ask the RPC node for its `chain_id` and refuse if it is `mainnet` or doesn't match the configured network.
 - `setup` supports testnet only. The vault needs at least 3 NEAR: its code storage stake is about 1.95 NEAR. Running the attack suite against a testnet vault (`pnpm attacks --network testnet`) needs at least 7 NEAR in it: A5 drains up to the 5 NEAR daily cap. On a shared vault A5 expects `floor((daily − spent today) / 0.1)` payments, and a run that crosses midnight UTC reports INCONCLUSIVE for A5.
 
 ## Scoring
