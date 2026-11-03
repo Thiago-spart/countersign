@@ -124,6 +124,12 @@ impl Env {
                     .await?;
             }
         }
+        // near-api's signer reads nonces at `Final`; right after start the final
+        // block can predate these accounts. Wait until their keys are visible.
+        wait_for_key(&net, &vault, &signer).await?;
+        if !matches!(registry_setup, Registry::Missing) {
+            wait_for_key(&net, &registry, &signer).await?;
+        }
         if let Registry::Deployed = registry_setup {
             near_api::Contract::deploy(registry.clone())
                 .use_code(registry_wasm())
@@ -331,6 +337,25 @@ impl Env {
             .assert_success()
             .json()?)
     }
+}
+
+/// Wait until `id`'s access key for `signer` is visible at `Final` (what
+/// near-api's signer uses for the nonce), at most 10 s.
+pub async fn wait_for_key(net: &NetworkConfig, id: &AccountId, signer: &Arc<Signer>) -> R {
+    let pk = signer.get_public_key().await?;
+    for _ in 0..100 {
+        if near_api::Account(id.clone())
+            .access_key(pk.clone())
+            .at(near_api::types::Reference::Final)
+            .fetch_from(net)
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    Err(format!("access key of {id} not visible after 10 s").into())
 }
 
 pub fn pending_id(outcome: &Value) -> U64 {

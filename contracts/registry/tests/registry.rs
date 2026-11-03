@@ -57,6 +57,27 @@ struct Env {
     contract: near_api::Contract,
 }
 
+/// A freshly started sandbox's final block can still be height 1, before the
+/// just-created account exists; near-api's signer reads the nonce at `Final`,
+/// so with 11 sandboxes in parallel deploys were flaky ("access key ... does
+/// not exist while viewing"). Wait until the key is visible at `Final`.
+async fn wait_for_key(net: &NetworkConfig, id: &AccountId, signer: &Arc<Signer>) -> R {
+    let pk = signer.get_public_key().await?;
+    for _ in 0..100 {
+        if near_api::Account(id.clone())
+            .access_key(pk.clone())
+            .at(near_api::types::Reference::Final)
+            .fetch_from(net)
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    Err(format!("access key of {id} not visible after 10 s").into())
+}
+
 impl Env {
     async fn new() -> R<Self> {
         let code = wasm().to_vec();
@@ -71,6 +92,7 @@ impl Env {
             .initial_balance(NearToken::from_near(10))
             .send()
             .await?;
+        wait_for_key(&net, &id, &signer).await?;
         near_api::Contract::deploy(id.clone())
             .use_code(code)
             .without_init_call()
