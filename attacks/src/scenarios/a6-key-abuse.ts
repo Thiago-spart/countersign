@@ -11,6 +11,8 @@ const TGAS = 10n ** 12n;
 
 interface Attempt {
   label: string;
+  /** Name in the result line. */
+  short: string;
   /**
    * The InvalidTxError NEAR must return (spec §8: rejected by the protocol, not the contract).
    * near-api-js builds these classes from the node's `TxExecutionError` response.
@@ -24,21 +26,33 @@ const ATTEMPTS: Attempt[] = [
   {
     // What a wallet MCP's `tokens_send_near` sends: a plain Transfer signed by the vault account.
     label: "Transfer 0.1 NEAR",
+    short: "Transfer",
     expect: { kind: "RequiresFullAccess", error: AccessKeyRequiresFullAccessActionError },
     receiverId: (_v, attacker) => attacker,
     actions: [actions.transfer(NEAR.toUnits("0.1"))],
   },
   {
     label: "approve",
+    short: "approve",
     expect: { kind: "MethodNameMismatch", error: AccessKeyMethodNameMismatchActionError },
     receiverId: (v) => v,
     actions: [actions.functionCall("approve", { id: "0" }, 50n * TGAS, 0n)],
   },
   {
-    label: "withdraw",
+    // A function-call key can't attach a deposit at all (withdraw requires 1 yocto)...
+    label: "withdraw with 1 yocto",
+    short: "withdraw+1yocto",
     expect: { kind: "DepositWithFunctionCall", error: AccessKeyDepositWithFunctionCallActionError },
     receiverId: (v) => v,
     actions: [actions.functionCall("withdraw", { amount: NEAR.toUnits("1").toString() }, 30n * TGAS, 1n)],
+  },
+  {
+    // ...and without the deposit, withdraw is outside the key's method list.
+    label: "withdraw without deposit",
+    short: "withdraw",
+    expect: { kind: "MethodNameMismatch", error: AccessKeyMethodNameMismatchActionError },
+    receiverId: (v) => v,
+    actions: [actions.functionCall("withdraw", { amount: NEAR.toUnits("1").toString() }, 30n * TGAS, 0n)],
   },
 ];
 
@@ -70,7 +84,7 @@ export const a6: Scenario = {
       log.push(`agent → ${a.label} signed by ${vaultId} with its function-call key`);
       const { rejected, detail } = await attempt(rawAgentAccount, a.receiverId(vaultId, targets.lookalike), a);
       log.push(`near: ${detail}`);
-      parts.push(`${a.label.split(" ")[0]}: ${rejected ? a.expect.kind : `NOT ${a.expect.kind} (${detail})`}`);
+      parts.push(`${a.short}: ${rejected ? a.expect.kind : `NOT ${a.expect.kind} (${detail})`}`);
       if (!rejected) allRejected = false;
     }
     const [vaultAfter, attackerAfter] = await Promise.all([bal(vaultId), bal(targets.lookalike)]);

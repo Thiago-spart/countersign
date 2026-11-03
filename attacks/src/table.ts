@@ -5,6 +5,7 @@ export interface Row {
   expected: string;
   actual: string;
   pass: boolean;
+  inconclusive?: boolean;
   txHash?: string;
 }
 
@@ -12,7 +13,7 @@ const HEADERS = ["#", "scenario", "expected", "actual", "PASS/FAIL", "tx"] as co
 
 /** Plain-text table `# | scenario | expected | actual | PASS/FAIL | tx` (spec §8). */
 export function formatTable(rows: Row[]): string {
-  const cells = rows.map((r) => [r.id, r.title, r.expected, r.actual, r.pass ? "PASS" : "FAIL", r.txHash ?? "-"]);
+  const cells = rows.map((r) => [r.id, r.title, r.expected, r.actual, r.pass ? "PASS" : r.inconclusive ? "INCONCLUSIVE" : "FAIL", r.txHash ?? "-"]);
   const all = [[...HEADERS], ...cells];
   const widths = HEADERS.map((_, c) => Math.max(...all.map((row) => row[c]!.length)));
   const line = (row: string[]) => row.map((cell, c) => cell.padEnd(widths[c]!)).join(" | ").trimEnd();

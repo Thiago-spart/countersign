@@ -1,3 +1,4 @@
+import { loadPolicy } from "@countersign/core";
 import { runScriptedAgent } from "../scriptedAgent.js";
 import type { Scenario } from "../types.js";
 
@@ -24,7 +25,7 @@ export const a3: Scenario = {
     const reports = (reg?.data as { reports?: number } | undefined)?.reports ?? 0;
     // Without the registry this receiver scores only first_contact: the block must come from the reports.
     const pass =
-      outcome.status === "refused" && v.decision === "block" && reports >= 3 && v.score - (reg?.points ?? 0) < 70;
+      outcome.status === "refused" && v.decision === "block" && reports >= 3 && v.score - (reg?.points ?? 0) < loadPolicy().thresholds.block;
     return {
       actual: `${v.decision} (registry +${reg?.points ?? 0} from ${reports} reports, score ${v.score}) → ${outcome.status}`,
       pass,

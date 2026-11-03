@@ -43,6 +43,7 @@ export interface ScenarioResult {
   expected: string;
   actual: string;
   pass: boolean;
+  inconclusive?: boolean;
   txHash?: string;
   durationMs: number;
   log: string[];
@@ -88,14 +89,19 @@ interface Bench {
   stop(): Promise<void>;
 }
 
+/**
+ * The scenario's env. The agent side never holds the owner key: the runner keeps the full config
+ * (owner-side setup happens in the sandbox helper); scenarios only sign with the agent key and read views.
+ */
 function makeEnv(config: Config, accounts: DemoAccounts, targets: Targets, receiptsDir: string, id: string): Promise<AttackEnv> {
+  const agentConfig: Config = { ...config, ownerKey: undefined };
   const provider = new JsonRpcProvider({ url: config.rpcUrl });
-  return guardedAgent({ config, receiptsPath: join(receiptsDir, `${id}.jsonl`) }).then((agent) => ({
+  return guardedAgent({ config: agentConfig, receiptsPath: join(receiptsDir, `${id}.jsonl`) }).then((agent) => ({
     agent,
-    vault: new VaultClient(config),
+    vault: new VaultClient(agentConfig),
     rawAgentAccount: new Account(config.vaultId!, provider, config.agentKey as KeyPairString),
     accounts,
-    config,
+    config: agentConfig,
     targets,
   }));
 }
@@ -199,7 +205,7 @@ export async function runAttacks(opts: RunOpts = {}): Promise<RunResult> {
       if (r.txHash !== undefined) r.txHash = redact(r.txHash);
       else delete r.txHash;
       for (const line of r.log) out(`  ${line}`);
-      out(`  ${r.pass ? "PASS" : "FAIL"} in ${(r.durationMs / 1000).toFixed(1)}s`);
+      out(`  ${r.pass ? "PASS" : r.inconclusive ? "INCONCLUSIVE" : "FAIL"} in ${(r.durationMs / 1000).toFixed(1)}s`);
       byId.set(id, r);
     }
   } finally {
@@ -245,6 +251,8 @@ async function main(): Promise<number> {
   const run = await runAttacks({ ...args, out: (l) => console.log(l) });
   console.log(`\n${formatTable(run.results)}\n`);
   const n = run.results.filter((r) => r.pass).length;
+  const inconclusive = run.results.filter((r) => r.inconclusive).map((r) => r.id);
+  if (inconclusive.length) console.log(`INCONCLUSIVE (not a pass; rerun): ${inconclusive.join(", ")}`);
   console.log(`${n}/${run.results.length} PASS on ${run.network} in ${(run.durationMs / 1000).toFixed(1)}s → ${LAST_RUN_PATH}`);
   writeFileSync(LAST_RUN_PATH, `${JSON.stringify(run, null, 2)}\n`);
   return run.passed ? 0 : 1;

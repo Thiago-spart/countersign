@@ -30,7 +30,8 @@ export async function ageSignal(target: string, ds: DataSource, ctx: CheckContex
   const days = (ctx.now.getTime() - createdAt.getTime()) / DAY;
   const data = { createdAt: createdAt.toISOString(), ageDays: Math.round(days * 100) / 100 };
   if (days < 1) {
-    const hours = Math.max(0, Math.floor(days * 24));
+    // Rounded (1.9999h reads "2h"), capped at 23 so the text never says "24h ago (under 1 day)".
+    const hours = Math.min(23, Math.max(0, Math.round(days * 24)));
     return { id: "age", status: "ok", points: policy.age.under1dPoints, reason: `account created ${hours}h ago (under 1 day)`, data };
   }
   if (days < 7) {

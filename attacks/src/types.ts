@@ -35,6 +35,8 @@ export interface AttackEnv {
 export interface ScenarioRun {
   actual: string;
   pass: boolean;
+  /** Neither PASS nor FAIL: the run couldn't measure the property (e.g. A5 across UTC midnight). Counts as not passed. */
+  inconclusive?: boolean;
   txHash?: string;
   log: string[];
 }

@@ -77,17 +77,20 @@ export function loadFixtures(path: string = DEFAULT_FIXTURES): FixtureData {
  */
 export class FixtureSource implements DataSource {
   private readonly data: Parsed;
+  /**
+   * Relative times resolve against one clock read at construction, so "-2h" is a fixed moment
+   * (as on a real chain) and never lands a few ms after the caller's `now` (which made 2h print as 1h).
+   */
+  private readonly clock: number;
 
-  constructor(
-    data: FixtureData,
-    private readonly now: () => Date = () => new Date(),
-  ) {
+  constructor(data: FixtureData, now: () => Date = () => new Date()) {
     this.data = validate(data, "(inline)");
+    this.clock = now().getTime();
   }
 
   private time(s: string): Date {
     const m = RELATIVE_RE.exec(s);
-    if (m) return new Date(this.now().getTime() - Number(m[1]) * UNIT_MS[m[2] as keyof typeof UNIT_MS]);
+    if (m) return new Date(this.clock - Number(m[1]) * UNIT_MS[m[2] as keyof typeof UNIT_MS]);
     return new Date(s);
   }
 

@@ -15,7 +15,8 @@
  * `fixtures/sandbox.json`; this helper creates it on chain.
  */
 import "./sandbox-env.js";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadFixtures, type Config } from "@countersign/core";
 import { Account, JsonRpcProvider, KeyPair, type KeyPairString } from "near-api-js";
@@ -24,7 +25,17 @@ import type { Limits } from "./vaultClient.js";
 import { vaultProvisionActions } from "./provision.js";
 import { DEFAULT_ACCOUNT_ID, DEFAULT_PRIVATE_KEY, Sandbox } from "near-sandbox";
 
-const RES = (name: string) => fileURLToPath(new URL(`../../../contracts/res/${name}.wasm`, import.meta.url));
+const DEFAULT_CONTRACTS_DIR = fileURLToPath(new URL("../../../contracts/res/", import.meta.url));
+
+/** Throws a clear error when the prebuilt contracts are missing (instead of a raw ENOENT mid-setup). */
+export function assertPrebuiltContracts(dir: string = DEFAULT_CONTRACTS_DIR): void {
+  const missing = ["registry", "vault"].filter((n) => !existsSync(join(dir, `${n}.wasm`)));
+  if (missing.length) {
+    throw new Error(
+      `prebuilt contracts missing at contracts/res/ (${missing.map((n) => `${n}.wasm`).join(", ")} not found in ${dir}) — run \`pnpm build:contracts\` (needs Rust)`,
+    );
+  }
+}
 
 
 export interface SandboxOpts {
@@ -36,6 +47,8 @@ export interface SandboxOpts {
   limits?: Limits;
   /** Accounts the owner trusts in the vault (default ["acme-corp.sandbox"]). */
   trusted?: string[];
+  /** Where registry.wasm and vault.wasm live (default `<repo>/contracts/res`). */
+  contractsDir?: string;
 }
 
 export interface VaultOpts {
@@ -73,6 +86,7 @@ export interface SandboxEnv {
 }
 
 export async function startSandbox(opts: SandboxOpts = {}): Promise<SandboxEnv> {
+  assertPrebuiltContracts(opts.contractsDir);
   const sandbox = await Sandbox.start({});
   try {
     return await setUp(sandbox, opts);
@@ -83,6 +97,8 @@ export async function startSandbox(opts: SandboxOpts = {}): Promise<SandboxEnv> 
 }
 
 async function setUp(sandbox: Sandbox, opts: SandboxOpts): Promise<SandboxEnv> {
+  const dir = opts.contractsDir ?? DEFAULT_CONTRACTS_DIR;
+  const RES = (name: string) => join(dir, `${name}.wasm`);
   const provider = new JsonRpcProvider({ url: sandbox.rpcUrl });
   const root = new Account(DEFAULT_ACCOUNT_ID, provider, DEFAULT_PRIVATE_KEY as KeyPairString);
   const ids = { owner: `owner.${DEFAULT_ACCOUNT_ID}`, vault: `vault.${DEFAULT_ACCOUNT_ID}`, registry: `registry.${DEFAULT_ACCOUNT_ID}` };

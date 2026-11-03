@@ -25,6 +25,16 @@ describe("FixtureSource", () => {
     expect((await fx.getAccountInfo("genesis.sandbox")).createdAt).toBeNull();
   });
 
+  it("resolves every relative time against one clock read at construction", async () => {
+    let t = NOW.getTime();
+    const ticking = () => new Date((t += 5));
+    const src = new FixtureSource({ accounts: { "fresh.sandbox": { createdAt: "-2h", txCount: 1 } } }, ticking);
+    const first = (await src.getAccountInfo("fresh.sandbox")).createdAt;
+    const second = (await src.getAccountInfo("fresh.sandbox")).createdAt;
+    expect(first).toEqual(new Date(NOW.getTime() + 5 - 2 * 3_600_000));
+    expect(second).toEqual(first);
+  });
+
   it("accountExists comes from the fixture data; unlisted accounts do not exist", async () => {
     expect(await fx.accountExists("fresh.sandbox")).toBe(true);
     expect(await fx.accountExists("gone.sandbox")).toBe(false);

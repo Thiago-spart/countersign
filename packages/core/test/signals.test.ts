@@ -24,6 +24,11 @@ describe("age", () => {
     expect(s).toMatchObject({ id: "age", status: "ok", points: pts });
   });
 
+  it("hours are rounded, not floored: 1h59m59s reads 2h", async () => {
+    const ds = memSource({ accounts: { [T]: { createdAt: ago(2 * HOUR - 1_000), txCount: 50 } } });
+    expect((await ageSignal(T, ds, ctx(), policy)).reason).toBe("account created 2h ago (under 1 day)");
+  });
+
   it("createdAt null (genesis) -> 0", async () => {
     const ds = memSource({ accounts: { [T]: { createdAt: null, txCount: 50 } } });
     expect((await ageSignal(T, ds, ctx(), policy)).points).toBe(0);

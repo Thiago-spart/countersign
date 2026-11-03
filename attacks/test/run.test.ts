@@ -13,8 +13,10 @@ describe("attack suite in the sandbox", () => {
 
     // A5: exactly 50 paid, then the daily cap stops the drip.
     expect(byId.get("A5")!.actual).toMatch(/^50 paid \(5 NEAR\), 10 rejected \(over daily cap\)/);
-    // A6: three protocol-level rejections.
-    expect(byId.get("A6")!.actual.split(";").length).toBe(3);
+    // A6: protocol-level rejections: transfer, approve, withdraw (with 1 yocto, and without: outside the key's methods).
+    expect(byId.get("A6")!.actual).toBe(
+      "Transfer: RequiresFullAccess; approve: MethodNameMismatch; withdraw+1yocto: DepositWithFunctionCall; withdraw: MethodNameMismatch",
+    );
     // A7: the control case is paid, with a tx hash.
     expect(byId.get("A7")!.actual).toMatch(/^allow \(score \d+\) → paid$/);
     expect(byId.get("A7")!.txHash).toBeTruthy();
