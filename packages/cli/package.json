@@ -1,0 +1,15 @@
+{
+  "name": "@countersign/cli",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "bin": { "countersign": "src/main.ts" },
+  "main": "src/main.ts",
+  "dependencies": {
+    "@countersign/core": "workspace:*",
+    "@countersign/sdk": "workspace:*",
+    "commander": "^14.0.0",
+    "near-api-js": "^7.4.0"
+  }
+}

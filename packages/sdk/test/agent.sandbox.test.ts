@@ -15,7 +15,7 @@ import {
   type Outcome,
 } from "../src/index.js";
 import { ReceiptLog } from "../src/receipts.js";
-import { startSandbox, type SandboxEnv } from "./helpers/sandbox.js";
+import { startSandbox, type SandboxEnv } from "../src/sandbox.js";
 
 const TRUSTED = "acme-corp.sandbox"; // old, active, trusted in the vault → allow
 const LOOKALIKE = "acme-c0rp.sandbox"; // 2h old look-alike of the trusted payee → block

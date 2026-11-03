@@ -16,3 +16,4 @@ export {
   redactSecrets,
   redactError,
 } from "./errors.js";
+export { vaultProvisionActions, AGENT_METHODS, AGENT_ALLOWANCE, type ProvisionOpts } from "./provision.js";

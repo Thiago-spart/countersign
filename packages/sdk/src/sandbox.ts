@@ -18,24 +18,14 @@ import "./sandbox-env.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { loadFixtures, type Config } from "@countersign/core";
-import { Account, JsonRpcProvider, KeyPair, actions, type KeyPairString } from "near-api-js";
+import { Account, JsonRpcProvider, KeyPair, type KeyPairString } from "near-api-js";
 import { NEAR } from "near-api-js/tokens";
+import type { Limits } from "./vaultClient.js";
+import { vaultProvisionActions } from "./provision.js";
 import { DEFAULT_ACCOUNT_ID, DEFAULT_PRIVATE_KEY, Sandbox } from "near-sandbox";
 
-const RES = (name: string) => fileURLToPath(new URL(`../../../../contracts/res/${name}.wasm`, import.meta.url));
-const TGAS = 10n ** 12n;
+const RES = (name: string) => fileURLToPath(new URL(`../../../contracts/res/${name}.wasm`, import.meta.url));
 
-export const AGENT_METHODS = ["pay", "request_approval", "report"];
-/** Ruling R3: the agent key's allowance. */
-export const AGENT_ALLOWANCE = NEAR.toUnits("1");
-
-/** Vault `Limits` JSON (yoctoNEAR strings). */
-export interface LimitsJson {
-  per_tx: string;
-  daily: string;
-  unknown_payee_max: string;
-  registry_pending_threshold: number;
-}
 
 export interface SandboxOpts {
   /** NEAR given to the vault (default 20). */
@@ -43,7 +33,7 @@ export interface SandboxOpts {
   /** NEAR given to each fixture account (default 5). */
   accountBalance?: string;
   /** Vault limits (default: the contract defaults). */
-  limits?: LimitsJson;
+  limits?: Limits;
   /** Accounts the owner trusts in the vault (default ["acme-corp.sandbox"]). */
   trusted?: string[];
 }
@@ -108,17 +98,15 @@ async function setUp(sandbox: Sandbox, opts: SandboxOpts): Promise<SandboxEnv> {
   const vault = new Account(ids.vault, provider, vaultKey);
   await vault.signAndSendTransaction({
     receiverId: ids.vault,
-    actions: [
-      actions.deployContract(readFileSync(RES("vault"))),
-      actions.functionCall(
-        "new",
-        { owner_id: ids.owner, registry_id: ids.registry, limits: opts.limits ?? null },
-        100n * TGAS,
-        0n,
-      ),
-      actions.addFunctionCallAccessKey(agentKey.getPublicKey(), ids.vault, AGENT_METHODS, AGENT_ALLOWANCE),
-      actions.deleteKey(vaultKp.getPublicKey()),
-    ],
+    actions: vaultProvisionActions({
+      vaultId: ids.vault,
+      wasm: readFileSync(RES("vault")),
+      ownerId: ids.owner,
+      registryId: ids.registry,
+      limits: opts.limits,
+      agentPublicKey: agentKey.getPublicKey(),
+      vaultPublicKey: vaultKp.getPublicKey(),
+    }),
   });
 
   const owner = new Account(ids.owner, provider, ownerKey);
@@ -148,5 +136,28 @@ async function setUp(sandbox: Sandbox, opts: SandboxOpts): Promise<SandboxEnv> {
     createAccount,
     balance: async (id) => (await provider.viewAccount({ accountId: id })).amount,
     tearDown: () => sandbox.tearDown(),
+  };
+}
+
+/** Accounts of the demo sandbox. */
+export interface DemoAccounts {
+  owner: string;
+  vault: string;
+  registry: string;
+  /** Fixture accounts created on chain (payees, look-alikes, reporters). */
+  fixtures: string[];
+}
+
+/** The sandbox for demos and the CLI: contracts deployed, fixture accounts created, keys in `config`. */
+export async function startDemoSandbox(opts: SandboxOpts = {}): Promise<{
+  config: Config;
+  accounts: DemoAccounts;
+  stop(): Promise<void>;
+}> {
+  const env = await startSandbox(opts);
+  return {
+    config: env.config,
+    accounts: { ...env.ids, fixtures: env.accounts },
+    stop: () => env.tearDown(),
   };
 }

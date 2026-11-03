@@ -11,7 +11,7 @@ export interface Receipt {
   ts: string;
   to: string;
   amountYocto: string;
-  verdict: { score: number; decision: Decision; reasons: string[] };
+  verdict: { score: number; decision: Decision | "approved_by_owner"; reasons: string[] };
   outcome: {
     status: "refused" | "pending" | "paid" | "rejected" | "failed";
     id?: string;

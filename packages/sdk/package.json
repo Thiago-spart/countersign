@@ -8,13 +8,11 @@
   "types": "src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./test/helpers/sandbox": "./test/helpers/sandbox.ts"
+    "./sandbox": "./src/sandbox.ts"
   },
   "dependencies": {
     "@countersign/core": "workspace:*",
+    "near-sandbox": "^0.3.4",
     "near-api-js": "^7.4.0"
-  },
-  "devDependencies": {
-    "near-sandbox": "^0.3.4"
   }
 }
