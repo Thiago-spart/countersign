@@ -1,18 +1,12 @@
 // Sandbox smoke test: start a local NEAR sandbox, create alice.<root> with 10 NEAR, print balance.
-// First run downloads the sandbox binary into node_modules; if /tmp is on another filesystem this fails
-// with EXDEV. Work around once with: TMPDIR=$PWD/.cache/tmp pnpm tsx scripts/smoke-sandbox.ts
-//
-// Root account (near-sandbox 0.3.x exports DEFAULT_ACCOUNT_ID / DEFAULT_PRIVATE_KEY in its
-// config; also shown in node_modules/near-sandbox/dist/esm/index.d.mts):
-//   id:  "sandbox"
-//   key: ed25519:3tgdk2wP... (public key ed25519:5BGSaf6Y...). Well-known test key, sandbox only.
+// Root account is near-sandbox's DEFAULT_ACCOUNT_ID ("sandbox") with its DEFAULT_PRIVATE_KEY.
+import "./sandbox-env.js";
 import { Account, JsonRpcProvider, KeyPair, type KeyPairString } from "near-api-js";
 import { NEAR } from "near-api-js/tokens";
-import { Sandbox } from "near-sandbox";
+import { DEFAULT_ACCOUNT_ID, DEFAULT_PRIVATE_KEY, Sandbox } from "near-sandbox";
 
-const ROOT_ID = "sandbox";
-const ROOT_KEY =
-  "ed25519:REDACTED_TEST_KEY";
+const ROOT_ID = DEFAULT_ACCOUNT_ID;
+const ROOT_KEY = DEFAULT_PRIVATE_KEY;
 
 const sandbox = await Sandbox.start({});
 try {
