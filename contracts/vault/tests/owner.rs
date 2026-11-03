@@ -452,3 +452,40 @@ async fn get_trusted_lists_trusted_accounts() -> R {
     assert_eq!(trusted, vec![carol.to_string()]);
     Ok(())
 }
+
+/// An approved payment the vault can no longer afford fails the whole
+/// `approve` receipt: nothing is sent, the payment stays pending and the
+/// daily reservation is rolled back (audit note I-5 in SECURITY.md).
+#[tokio::test]
+async fn approve_unaffordable_payment_rolls_back() -> R {
+    let env = Env::new().await?;
+    let bob = env.account("bob").await?;
+    let id = pending_id(&env.request_approval(&bob, ONE).await?);
+    // Leave ~0.5 NEAR above the storage stake.
+    let a = near_api::Account(env.vault.clone())
+        .view()
+        .fetch_from(&env.net)
+        .await?
+        .data;
+    let stake = NearToken::from_yoctonear(10u128.pow(19) * u128::from(a.storage_usage));
+    let available = a.amount.saturating_sub(stake);
+    env.owner_call(
+        "withdraw",
+        json!({"amount": available.saturating_sub(NearToken::from_millinear(500))}),
+    )
+    .await?
+    .assert_success();
+    let bob_before = env.balance(&bob).await?;
+
+    // The transfer receipt would take the vault below its storage stake, so
+    // the runtime fails the whole `approve` receipt.
+    fails_with(
+        env.owner_call("approve", json!({ "id": id })).await?,
+        "LackBalanceForState",
+    );
+
+    assert_eq!(env.pending().await?.len(), 1, "payment must stay pending");
+    assert_eq!(env.spent_today().await?, NearToken::from_yoctonear(0));
+    assert_eq!(env.balance(&bob).await?, bob_before);
+    Ok(())
+}
