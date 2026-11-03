@@ -1,0 +1,12 @@
+{
+  "thresholds": { "warn": 30, "block": 70 },
+  "unknownPoints": 10,
+  "exists": { "missingDecision": "block" },
+  "lookalike": { "maxDistance": 2, "minLabelLength": 5, "points": 45 },
+  "registry": { "perReport": 25, "cap": 75, "rebuttalFactor": 0.5, "credibilityAgeDays": 30, "credibilityMinTx": 10, "lowActivityFactor": 0.5 },
+  "age": { "under1dPoints": 30, "under7dPoints": 15 },
+  "activity": { "minTx": 5, "points": 10 },
+  "codeChange": { "withinDays": 7, "points": 25 },
+  "firstContact": { "points": 5 },
+  "trustedSkips": ["lookalike", "first_contact", "age"]
+}
