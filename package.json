@@ -11,7 +11,7 @@
     "build:contracts": "bash scripts/build-contracts.sh",
     "test": "vitest run --passWithNoTests",
     "test:contracts": "bash scripts/test-contracts.sh",
-    "attacks": "echo 'attacks: placeholder until Task 11' && exit 0",
+    "attacks": "tsx attacks/src/run.ts",
     "typecheck": "tsc -b",
     "smoke": "tsx scripts/smoke-sandbox.ts"
   },

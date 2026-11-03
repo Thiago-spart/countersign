@@ -38,6 +38,15 @@ export interface SandboxOpts {
   trusted?: string[];
 }
 
+export interface VaultOpts {
+  /** NEAR given to the vault (default: SandboxOpts.vaultBalance, else 20). */
+  vaultBalance?: string;
+  /** Vault limits (default: SandboxOpts.limits, else the contract defaults). */
+  limits?: Limits;
+  /** Accounts the owner trusts (default: SandboxOpts.trusted, else ["acme-corp.sandbox"]). */
+  trusted?: string[];
+}
+
 export interface SandboxEnv {
   sandbox: Sandbox;
   provider: JsonRpcProvider;
@@ -51,6 +60,13 @@ export interface SandboxEnv {
   config: Config;
   /** Create `id` (a sub-account of `sandbox`) with `near` NEAR. Returns its key. */
   createAccount(id: string, near?: string): Promise<KeyPairString>;
+  /**
+   * Create and provision another vault (same owner and registry, its own agent key), so callers
+   * can isolate state such as the daily cap. Returns the SDK config for it.
+   */
+  provisionVault(vaultId: string, opts?: VaultOpts): Promise<Config>;
+  /** A fixture account, signing with its full-access key (e.g. to file registry reports). */
+  account(id: string): Account;
   /** Total balance in yoctoNEAR. */
   balance(id: string): Promise<bigint>;
   tearDown(): Promise<void>;
@@ -83,46 +99,55 @@ async function setUp(sandbox: Sandbox, opts: SandboxOpts): Promise<SandboxEnv> {
     .filter(([id, a]) => a.exists !== false && id !== ids.registry && id.endsWith(`.${DEFAULT_ACCOUNT_ID}`))
     .map(([id]) => id);
 
-  const [ownerKey, vaultKey, registryKey] = await Promise.all([
+  const [ownerKey, registryKey, ...fixtureKeys] = await Promise.all([
     createAccount(ids.owner, "10"),
-    createAccount(ids.vault, opts.vaultBalance ?? "20"),
     createAccount(ids.registry, "10"),
     ...accounts.map((id) => createAccount(id, opts.accountBalance ?? "5")),
   ]);
+  const keys = new Map<string, KeyPairString>(accounts.map((id, i) => [id, fixtureKeys[i]!]));
 
   const registry = new Account(ids.registry, provider, registryKey);
   await registry.deployContract(readFileSync(RES("registry")));
 
-  const agentKey = KeyPair.fromRandom("ed25519");
-  const vaultKp = KeyPair.fromString(vaultKey!);
-  const vault = new Account(ids.vault, provider, vaultKey);
-  await vault.signAndSendTransaction({
-    receiverId: ids.vault,
-    actions: vaultProvisionActions({
-      vaultId: ids.vault,
-      wasm: readFileSync(RES("vault")),
-      ownerId: ids.owner,
-      registryId: ids.registry,
-      limits: opts.limits,
-      agentPublicKey: agentKey.getPublicKey(),
-      vaultPublicKey: vaultKp.getPublicKey(),
-    }),
-  });
-
   const owner = new Account(ids.owner, provider, ownerKey);
-  for (const id of opts.trusted ?? ["acme-corp.sandbox"]) {
-    await owner.callFunction({ contractId: ids.vault, methodName: "trust", args: { account_id: id }, deposit: 1n });
-  }
 
-  const config: Config = {
-    network: "sandbox",
-    rpcUrl: sandbox.rpcUrl,
-    nearblocksUrl: null,
-    registryId: ids.registry,
-    vaultId: ids.vault,
-    agentKey: agentKey.toString(),
-    ownerId: ids.owner,
-    ownerKey: ownerKey!,
+  const provisionVault = async (vaultId: string, vopts: VaultOpts = {}): Promise<Config> => {
+    const vaultKey = await createAccount(vaultId, vopts.vaultBalance ?? opts.vaultBalance ?? "20");
+    const agentKey = KeyPair.fromRandom("ed25519");
+    const vault = new Account(vaultId, provider, vaultKey);
+    await vault.signAndSendTransaction({
+      receiverId: vaultId,
+      actions: vaultProvisionActions({
+        vaultId,
+        wasm: readFileSync(RES("vault")),
+        ownerId: ids.owner,
+        registryId: ids.registry,
+        limits: vopts.limits ?? opts.limits,
+        agentPublicKey: agentKey.getPublicKey(),
+        vaultPublicKey: KeyPair.fromString(vaultKey).getPublicKey(),
+      }),
+    });
+    for (const id of vopts.trusted ?? opts.trusted ?? ["acme-corp.sandbox"]) {
+      await owner.callFunction({ contractId: vaultId, methodName: "trust", args: { account_id: id }, deposit: 1n });
+    }
+    return {
+      network: "sandbox",
+      rpcUrl: sandbox.rpcUrl,
+      nearblocksUrl: null,
+      registryId: ids.registry,
+      vaultId,
+      agentKey: agentKey.toString(),
+      ownerId: ids.owner,
+      ownerKey: ownerKey!,
+    };
+  };
+
+  const config = await provisionVault(ids.vault);
+
+  const account = (id: string): Account => {
+    const key = keys.get(id);
+    if (!key) throw new Error(`${id} is not a fixture account of this sandbox`);
+    return new Account(id, provider, key);
   };
 
   return {
@@ -134,6 +159,8 @@ async function setUp(sandbox: Sandbox, opts: SandboxOpts): Promise<SandboxEnv> {
     accounts,
     config,
     createAccount,
+    provisionVault,
+    account,
     balance: async (id) => (await provider.viewAccount({ accountId: id })).amount,
     tearDown: () => sandbox.tearDown(),
   };
@@ -152,12 +179,18 @@ export interface DemoAccounts {
 export async function startDemoSandbox(opts: SandboxOpts = {}): Promise<{
   config: Config;
   accounts: DemoAccounts;
+  /** See SandboxEnv.provisionVault. */
+  provisionVault(vaultId: string, opts?: VaultOpts): Promise<Config>;
+  /** See SandboxEnv.account. */
+  account(id: string): Account;
   stop(): Promise<void>;
 }> {
   const env = await startSandbox(opts);
   return {
     config: env.config,
     accounts: { ...env.ids, fixtures: env.accounts },
+    provisionVault: env.provisionVault,
+    account: env.account,
     stop: () => env.tearDown(),
   };
 }

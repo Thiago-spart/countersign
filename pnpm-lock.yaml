@@ -27,6 +27,18 @@ importers:
         specifier: ^5.0.5
         version: 5.0.5(@types/node@26.6.6)(vite@8.3.5(@types/node@26.6.6)(esbuild@0.28.2)(tsx@4.23.15))
 
+  attacks:
+    dependencies:
+      '@countersign/core':
+        specifier: workspace:*
+        version: link:../packages/core
+      '@countersign/sdk':
+        specifier: workspace:*
+        version: link:../packages/sdk
+      near-api-js:
+        specifier: ^7.4.0
+        version: 7.4.0
+
   packages/cli:
     dependencies:
       '@countersign/core':
