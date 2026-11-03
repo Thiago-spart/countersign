@@ -33,6 +33,19 @@ importers:
         specifier: ^4.0.0
         version: 4.6.7
 
+  packages/sdk:
+    dependencies:
+      '@countersign/core':
+        specifier: workspace:*
+        version: link:../core
+      near-api-js:
+        specifier: ^7.4.0
+        version: 7.4.0
+    devDependencies:
+      near-sandbox:
+        specifier: ^0.3.4
+        version: 0.3.4
+
 packages:
 
   '@esbuild/aix-ppc64@0.28.2':
