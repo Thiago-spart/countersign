@@ -1,0 +1,27 @@
+{
+  "name": "countersign",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.22.2"
+  },
+  "scripts": {
+    "build:contracts": "bash scripts/build-contracts.sh",
+    "test": "vitest run --passWithNoTests",
+    "test:contracts": "bash scripts/test-contracts.sh",
+    "attacks": "tsx attacks/src/run.ts",
+    "countersign": "tsx packages/cli/src/main.ts",
+    "typecheck": "tsc -b",
+    "smoke": "tsx scripts/smoke-sandbox.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "near-api-js": "^7.4.0",
+    "near-sandbox": "^0.3.4",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}

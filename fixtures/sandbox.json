@@ -1,0 +1,15 @@
+{
+  "$comment": "Sandbox account data for FixtureSource (spec §6.2). Times are ISO-8601 or relative to now (\"-2h\", \"-3d\"). An account not listed here does not exist. Registry reports come from the live sandbox registry, not from this file. Task 10 adds the accounts each scenario needs.",
+  "accounts": {
+    "acme-corp.sandbox": { "createdAt": "-400d", "txCount": 1250 },
+    "acme-c0rp.sandbox": { "createdAt": "-2h", "txCount": 1 },
+    "fresh-invoice.sandbox": { "createdAt": "-3h", "txCount": 1 },
+    "reported.sandbox": { "createdAt": "-120d", "txCount": 85 },
+    "reporter1.sandbox": { "createdAt": "-200d", "txCount": 140 },
+    "reporter2.sandbox": { "createdAt": "-150d", "txCount": 60 },
+    "reporter3.sandbox": { "createdAt": "-90d", "txCount": 33 },
+    "unknown-payee.sandbox": { "createdAt": "-60d", "txCount": 12 },
+    "registry.sandbox": { "createdAt": "-30d", "txCount": 20, "isContract": true, "lastDeployAt": "-30d" },
+    "typo-acct.sandbox": { "exists": false }
+  }
+}

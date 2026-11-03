@@ -1,0 +1,13 @@
+{
+  "name": "@countersign/attacks",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "main": "src/run.ts",
+  "dependencies": {
+    "@countersign/core": "workspace:*",
+    "@countersign/sdk": "workspace:*",
+    "near-api-js": "^7.4.0"
+  }
+}

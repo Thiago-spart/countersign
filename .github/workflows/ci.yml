@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # What a judge runs: Node only, against the committed contracts/res/*.wasm.
+  node:
+    name: Node only (committed wasm)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.16.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm i --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm attacks
+
+  # Rebuild the contracts from source, run the Rust sandbox tests, then the
+  # attack suite again on the fresh wasm.
+  #
+  # There is no `git diff --exit-code contracts/res` check. build-contracts.sh
+  # remaps the cargo home and repo paths, and clean builds match byte-for-byte
+  # on the machine that built the committed wasm, but a match on a runner
+  # (other OS image, toolchain install, cargo registry) is not verified.
+  contracts:
+    name: Contracts (build from source)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.16.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      # Pinned to the rustc that built the committed wasm; cargo-near checks
+      # rustc against the protocol version near-sdk targets.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts
+      - name: Install cargo-near 0.22.0
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            https://github.com/near/cargo-near/releases/download/cargo-near-v0.22.0/cargo-near-installer.sh | sh
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - run: cargo near --version
+      - run: pnpm i --frozen-lockfile
+      - run: pnpm build:contracts
+      - run: pnpm test:contracts
+      - run: pnpm attacks

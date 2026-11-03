@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","error":{"name":"HANDLER_ERROR","cause":{"info":{"block_hash":"2tkHqmXm52K3U4BXRLHBmM8nTfrGc7on1KViWVtM2phs","block_height":222882452,"requested_account_id":"no-such-account-countersign-zz9.near"},"name":"UNKNOWN_ACCOUNT"},"code":-32000,"message":"Server error","data":"account no-such-account-countersign-zz9.near does not exist while viewing"},"id":"countersign"}
