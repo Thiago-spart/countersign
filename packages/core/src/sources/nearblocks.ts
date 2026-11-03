@@ -1,6 +1,6 @@
 import { DiskCache } from "./cache.js";
 import { fetchJson, type HttpOpts } from "./http.js";
-import { SourceUnavailableError, nsToDate, type AccountInfo } from "./types.js";
+import { IndexerLagError, SourceUnavailableError, nsToDate, type AccountInfo } from "./types.js";
 
 const SOURCE = "NearBlocks";
 
@@ -27,14 +27,15 @@ export class NearBlocksClient {
 
   /**
    * GET a path, served from the cache when fresh. `parse` validates the body; it is cached
-   * only if `parse` succeeds, so indexer-lag responses are refetched next time.
+   * only if `parse` succeeds and `cacheIf(value)` holds, so indexer-lag responses are refetched next time.
    */
-  private async get<T>(path: string, parse: (body: unknown) => T): Promise<T> {
+  private async get<T>(path: string, parse: (body: unknown) => T, cacheIf: (v: T) => boolean = () => true): Promise<T> {
     const url = `${this.base}${path}`;
     const cached = this.cache.get(url);
     if (cached !== undefined) {
       try {
-        return parse(cached);
+        const v = parse(cached);
+        if (cacheIf(v)) return v;
       } catch {
         // fall through and refetch
       }
@@ -49,7 +50,7 @@ export class NearBlocksClient {
       if (e instanceof SourceUnavailableError) throw e;
       throw bad(`unexpected response from ${url}: ${e instanceof Error ? e.message : String(e)}`, e);
     }
-    this.cache.set(url, body);
+    if (cacheIf(value)) this.cache.set(url, body);
     return value;
   }
 
@@ -65,9 +66,20 @@ export class NearBlocksClient {
         if (!rows) throw new TypeError("no account array");
         // Unknown or not-yet-indexed accounts come back as [] or [{block_height, block_hash}].
         const row = rows.find((r): r is Record<string, unknown> => isObj(r) && typeof r.account_id === "string");
-        if (!row) throw bad(`account ${id} not indexed yet (indexer lag or missing account)`);
-        const created = isObj(row.created) ? row.created.block_timestamp : null;
-        return nsToDate(created);
+        if (!row) {
+          throw new IndexerLagError(`${SOURCE}: account ${id} not indexed yet (indexer lag or missing account)`, {
+            source: SOURCE,
+          });
+        }
+        // Only an explicit `created.block_timestamp: null` means genesis; a missing key is a shape change.
+        if (!isObj(row.created) || !("block_timestamp" in row.created)) {
+          throw new TypeError("account row has no created.block_timestamp");
+        }
+        const ts = row.created.block_timestamp;
+        if (ts === null) return null;
+        const d = nsToDate(ts);
+        if (!d) throw new TypeError("bad created.block_timestamp");
+        return d;
       }),
       this.get(this.path(id, "/txns/count"), (b) => {
         const row = isObj(b) && Array.isArray(b.txns) ? b.txns[0] : undefined;
@@ -80,17 +92,26 @@ export class NearBlocksClient {
     return { exists: true, createdAt, txCount };
   }
 
-  /** Max `block_timestamp` over `/contract/deployments` (the list is not ordered); null if none. */
+  /**
+   * Max `block_timestamp` over `/contract/deployments` (the list is not ordered); null if none.
+   * An empty list is never cached (the deployment may not be indexed yet). A row with an
+   * unparseable timestamp throws SourceUnavailableError.
+   */
   async getLastDeployAt(id: string): Promise<Date | null> {
-    return this.get(this.path(id, "/contract/deployments"), (b) => {
-      const rows = isObj(b) && Array.isArray(b.deployments) ? b.deployments : null;
-      if (!rows) throw new TypeError("no deployments array");
-      let max: Date | null = null;
-      for (const r of rows) {
-        const d = isObj(r) ? nsToDate(r.block_timestamp) : null;
-        if (d && (!max || d > max)) max = d;
-      }
-      return max;
-    });
+    return this.get(
+      this.path(id, "/contract/deployments"),
+      (b) => {
+        const rows = isObj(b) && Array.isArray(b.deployments) ? b.deployments : null;
+        if (!rows) throw new TypeError("no deployments array");
+        let max: Date | null = null;
+        for (const r of rows) {
+          const d = isObj(r) ? nsToDate(r.block_timestamp) : null;
+          if (!d) throw new TypeError(`unparseable deployment row ${JSON.stringify(r)}`);
+          if (!max || d > max) max = d;
+        }
+        return max;
+      },
+      (max) => max !== null,
+    );
   }
 }

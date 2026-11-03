@@ -10,6 +10,8 @@ import { registrySignal } from "./signals/registry.js";
 import { SourceUnavailableError, type DataSource } from "./sources/types.js";
 import type { CheckContext, Signal, SignalId, Verdict } from "./types.js";
 
+export const UNAVAILABLE_REASON = "some data sources were unavailable";
+
 type Fetcher = (target: string, ds: DataSource, ctx: CheckContext, policy: Policy) => Promise<Signal>;
 
 /** Order of signals in the verdict. */
@@ -58,6 +60,7 @@ function unknownSignal(id: SignalId, err: unknown, policy: Policy): Signal {
 /**
  * Gathers every signal about `target` in parallel and scores them. Fails closed: any signal whose
  * fetch rejects becomes `unknown` (+unknownPoints), so an outage yields `warn`, never `allow`.
+ * If any signal besides `exists` is unknown, an `allow` is raised to `warn`.
  * Trusted targets skip `policy.trustedSkips` (those signals are absent from the verdict).
  */
 export async function check(target: string, ctx: CheckContext, ds: DataSource, policy: Policy): Promise<Verdict> {
@@ -71,5 +74,15 @@ export async function check(target: string, ctx: CheckContext, ds: DataSource, p
   const signals = settled.map((r, i) =>
     r.status === "fulfilled" ? r.value : unknownSignal(active[i]![0], r.reason, policy),
   );
-  return scoreSignals(target, signals, policy);
+  const verdict = scoreSignals(target, signals, policy);
+  // Fail closed (spec §9): missing data never yields allow.
+  if (verdict.decision === "allow" && signals.some((s) => s.id !== "exists" && s.status === "unknown")) {
+    return {
+      ...verdict,
+      decision: "warn",
+      score: Math.max(verdict.score, policy.thresholds.warn),
+      reasons: [...verdict.reasons, UNAVAILABLE_REASON],
+    };
+  }
+  return verdict;
 }

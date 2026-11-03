@@ -34,8 +34,9 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R
 
 /**
  * Registry reports, each weighted `perReport × credibility(reporter)`; ×rebuttalFactor if the target
- * rebutted; capped; rounded. A reporter whose account info can't be fetched weighs 0 (the signal
- * stays ok and names them). Failing to read the registry itself propagates (check → unknown).
+ * rebutted; capped; rounded. If any reporter's account info can't be fetched, the signal is
+ * `unknown` (fail closed); its reason names the unverified reporters and `data.points` holds the
+ * points from the verified ones. Failing to read the registry itself propagates (check → unknown).
  */
 export async function registrySignal(target: string, ds: DataSource, ctx: CheckContext, policy: Policy): Promise<Signal> {
   const r = policy.registry;
@@ -65,14 +66,17 @@ export async function registrySignal(target: string, ds: DataSource, ctx: CheckC
   const categories = [...new Set(reports.map((x) => x.category))].join(", ");
   const parts = [`reported ${reports.length} time${reports.length === 1 ? "" : "s"} in the registry (${categories}), weighted ${points}`];
   if (rebutted) parts.push(`target has rebutted (x${r.rebuttalFactor})`);
-  if (unchecked.length) parts.push(`could not check reporter${unchecked.length === 1 ? "" : "s"} ${unchecked.join(", ")} (weighted 0)`);
+  if (unchecked.length) parts.push(`could not verify reporter${unchecked.length === 1 ? "" : "s"} ${unchecked.join(", ")}`);
+  const unknown = unchecked.length > 0;
 
   return {
     id: "registry",
-    status: "ok",
-    points,
-    reason: parts.join("; "),
+    status: unknown ? "unknown" : "ok",
+    points: unknown ? policy.unknownPoints : points,
+    reason: (unknown ? "registry unknown: " : "") + parts.join("; "),
     data: {
+      points,
+      unverifiedReporters: unchecked,
       reports: reports.length,
       rebutted,
       reporters: reporters.map((id) => ({ id, credibility: cred.get(id) ?? null })),

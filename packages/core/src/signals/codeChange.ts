@@ -4,12 +4,15 @@ import type { CheckContext, Signal } from "../types.js";
 
 const DAY = 86_400_000;
 
-/** A contract (re)deployed within `codeChange.withinDays` → `codeChange.points`. */
+/** A contract (re)deployed within `codeChange.withinDays`, or with no indexed deployment → `codeChange.points`. */
 export async function codeChangeSignal(target: string, ds: DataSource, ctx: CheckContext, policy: Policy): Promise<Signal> {
   const { isContract, lastDeployAt } = await ds.getCodeInfo(target);
   if (!isContract) return { id: "code_change", status: "ok", points: 0, reason: "not a contract", data: { isContract } };
   const data = { isContract, lastDeployAt: lastDeployAt?.toISOString() ?? null };
-  if (lastDeployAt === null) return { id: "code_change", status: "ok", points: 0, reason: "contract with no recorded deployment", data };
+  // A contract with no indexed deployment was most likely deployed moments ago (indexer lag).
+  if (lastDeployAt === null) {
+    return { id: "code_change", status: "ok", points: policy.codeChange.points, reason: "contract deployment not yet indexed", data };
+  }
   const days = (ctx.now.getTime() - lastDeployAt.getTime()) / DAY;
   if (days < policy.codeChange.withinDays) {
     return {

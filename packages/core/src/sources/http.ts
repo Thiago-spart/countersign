@@ -1,7 +1,7 @@
 import { SourceUnavailableError, defaultSleep, type FetchFn, type SleepFn } from "./types.js";
 
-/** Waits before each retry: 1 attempt + 3 retries. */
-export const RETRY_BACKOFF_MS = [250, 500, 1000] as const;
+/** Waits before each retry: at most 3 attempts in total (spec §6.2). */
+export const RETRY_BACKOFF_MS = [250, 500] as const;
 const REQUEST_TIMEOUT_MS = 10_000;
 
 export interface HttpOpts {
@@ -12,7 +12,7 @@ export interface HttpOpts {
 const retryable = (status: number) => status === 429 || status >= 500;
 
 /**
- * Fetches and parses JSON. Retries on 429, 5xx and network errors with backoff 250/500/1000 ms,
+ * Fetches and parses JSON. Retries on 429, 5xx and network errors with backoff 250/500 ms (3 attempts),
  * then throws SourceUnavailableError. Other non-2xx statuses and bad JSON fail at once.
  */
 export async function fetchJson(

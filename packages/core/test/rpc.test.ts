@@ -61,7 +61,7 @@ describe("RpcClient.viewAccount (recorded fixtures)", () => {
   it("retries 5xx, then gives up with SourceUnavailableError", async () => {
     const { fetch, calls } = stubFetch(() => ({ status: 502 }));
     await expect(rpc(fetch).viewAccount("intents.near")).rejects.toBeInstanceOf(SourceUnavailableError);
-    expect(calls).toHaveLength(4);
+    expect(calls).toHaveLength(3);
   });
 });
 
@@ -164,14 +164,39 @@ describe("live DataSource (RPC + NearBlocks)", () => {
     expect(await ds.accountExists("no-such-account-countersign-zz9.near")).toBe(false);
   });
 
-  it("RPC finds the account but NearBlocks returns an empty array -> exists: true, age and activity unknown", async () => {
+  it("RPC finds the account but NearBlocks returns an empty array -> exists: true, age +30 (lag), activity unknown -> 45 warn", async () => {
     const { fetch } = live({ account: [] });
     const ds = createDataSource(cfg, { fetch, sleep: noSleep, cacheDir: tempCacheDir() });
     const v = await check(RECENT, ctx({ network: "mainnet" }), ds, policy);
     const by = Object.fromEntries(v.signals.map((s) => [s.id, s]));
     expect(by.exists).toMatchObject({ status: "ok", data: { exists: true } });
-    expect(by.age?.status).toBe("unknown");
+    expect(by.age).toMatchObject({ status: "ok", points: 30 });
+    expect(by.age?.reason).toMatch(/not yet indexed/);
     expect(by.activity?.status).toBe("unknown");
-    expect(by.age?.reason).toMatch(/NearBlocks/);
+    expect(by.activity?.reason).toMatch(/NearBlocks/);
+    expect(v.score).toBe(45);
+    expect(v.decision).toBe("warn");
+  });
+
+  it("a contract (per RPC) with no indexed deployment -> code_change +25", async () => {
+    const { fetch } = live(fixtureJson("nearblocks/intents.account.json"));
+    const ds = createDataSource(cfg, { fetch, sleep: noSleep, cacheDir: tempCacheDir() });
+    expect(await ds.getCodeInfo("intents.near")).toEqual({ isContract: true, lastDeployAt: null });
+    const v = await check("intents.near", ctx({ network: "mainnet", pastPayees: ["intents.near"] }), ds, policy);
+    expect(v.signals.find((s) => s.id === "code_change")).toMatchObject({
+      status: "ok",
+      points: 25,
+      reason: "contract deployment not yet indexed",
+    });
+  });
+
+  it("NearBlocks-only outage (RPC healthy) never allows", async () => {
+    const { fetch } = stubFetch((url, init) => (url === RPC ? recordedRpc(url, init) : { status: 429 }));
+    const ds = createDataSource(cfg, { fetch, sleep: noSleep, cacheDir: tempCacheDir() });
+    const v = await check(RECENT, ctx({ network: "mainnet" }), ds, policy);
+    expect(v.signals.find((s) => s.id === "age")?.status).toBe("unknown");
+    expect(v.decision).toBe("warn");
+    expect(v.score).toBeGreaterThanOrEqual(30);
+    expect(v.reasons).toContain("some data sources were unavailable");
   });
 });

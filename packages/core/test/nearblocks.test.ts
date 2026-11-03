@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DiskCache } from "../src/sources/cache.js";
 import { NearBlocksClient } from "../src/sources/nearblocks.js";
-import { SourceUnavailableError } from "../src/sources/types.js";
+import { IndexerLagError, SourceUnavailableError } from "../src/sources/types.js";
 import { fixtureJson, noSleep, stubFetch, tempCacheDir, type StubResponse } from "./helpers.js";
 
 const BASE = "https://api.nearblocks.io/v1";
@@ -86,8 +86,9 @@ describe("NearBlocksClient retry and cache", () => {
     const slept: number[] = [];
     const nb = client(fetch, { sleep: async (ms) => void slept.push(ms) });
     await expect(nb.getLastDeployAt("intents.near")).rejects.toBeInstanceOf(SourceUnavailableError);
-    expect(calls).toHaveLength(4);
-    expect(slept).toEqual([250, 500, 1000]);
+    // At most 3 attempts in total (spec §6.2).
+    expect(calls).toHaveLength(3);
+    expect(slept).toEqual([250, 500]);
   });
 
   it("retries 5xx and network errors too", async () => {
@@ -133,7 +134,7 @@ describe("NearBlocksClient retry and cache", () => {
     const { fetch } = stubFetch((url) =>
       url.includes("/txns/count") ? { body: { txns: [{ count: "0" }] } } : { body: { account: [] } },
     );
-    await expect(client(fetch).getAccountInfo("fresh.near")).rejects.toBeInstanceOf(SourceUnavailableError);
+    await expect(client(fetch).getAccountInfo("fresh.near")).rejects.toBeInstanceOf(IndexerLagError);
   });
 
   it("the recorded unknown-account shape (no account_id) -> SourceUnavailableError, and is not cached", async () => {
@@ -143,6 +144,36 @@ describe("NearBlocksClient retry and cache", () => {
     const n = calls.filter((c) => c.url.endsWith("/account/nobody-here.near")).length;
     await expect(nb.getAccountInfo("nobody-here.near")).rejects.toBeInstanceOf(SourceUnavailableError);
     expect(calls.filter((c) => c.url.endsWith("/account/nobody-here.near")).length).toBe(n + 1);
+  });
+
+  it.each([
+    ["no created key", { account_id: "x.near" }],
+    ["created without block_timestamp", { account_id: "x.near", created: { transaction_hash: "h" } }],
+  ])("shape change (%s) -> SourceUnavailableError, not genesis, and not cached", async (_l, row) => {
+    const { fetch, calls } = stubFetch((url) =>
+      url.includes("/txns/count") ? { body: { txns: [{ count: "50" }] } } : { body: { account: [row] } },
+    );
+    const nb = client(fetch);
+    const err = await nb.getAccountInfo("x.near").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SourceUnavailableError);
+    expect(err).not.toBeInstanceOf(IndexerLagError);
+    await nb.getAccountInfo("x.near").catch(() => {});
+    expect(calls.filter((c) => c.url.endsWith("/account/x.near"))).toHaveLength(2);
+  });
+
+  it("an unparseable deployment block_timestamp -> SourceUnavailableError", async () => {
+    const { fetch } = stubFetch(() => ({
+      body: { deployments: [{ transaction_hash: "a", block_timestamp: "1791402796754974903" }, { transaction_hash: "b", block_timestamp: "soon" }] },
+    }));
+    await expect(client(fetch).getLastDeployAt("c.near")).rejects.toBeInstanceOf(SourceUnavailableError);
+  });
+
+  it("an empty deployments list is not cached", async () => {
+    const { fetch, calls } = stubFetch(() => ({ body: { deployments: [] } }));
+    const nb = client(fetch);
+    expect(await nb.getLastDeployAt("c.near")).toBeNull();
+    expect(await nb.getLastDeployAt("c.near")).toBeNull();
+    expect(calls).toHaveLength(2);
   });
 
   it("sends Authorization only when an API key is set", async () => {

@@ -6,6 +6,7 @@ import { codeChangeSignal } from "../src/signals/codeChange.js";
 import { existsSignal } from "../src/signals/exists.js";
 import { firstContactSignal } from "../src/signals/firstContact.js";
 import { registrySignal } from "../src/signals/registry.js";
+import { IndexerLagError } from "../src/sources/types.js";
 import { DAY, ago, ctx, memSource, report } from "./helpers.js";
 
 const policy = loadPolicy();
@@ -26,6 +27,26 @@ describe("age", () => {
   it("createdAt null (genesis) -> 0", async () => {
     const ds = memSource({ accounts: { [T]: { createdAt: null, txCount: 50 } } });
     expect((await ageSignal(T, ds, ctx(), policy)).points).toBe(0);
+  });
+
+  it("indexer lag on an account RPC knows -> ok, under-1-day points", async () => {
+    const ds = {
+      ...memSource({}),
+      accountExists: async () => true,
+      getAccountInfo: async () => Promise.reject(new IndexerLagError("not indexed", { source: "NearBlocks" })),
+    };
+    const s = await ageSignal(T, ds, ctx(), policy);
+    expect(s).toMatchObject({ status: "ok", points: 30 });
+    expect(s.reason).toMatch(/not yet indexed/);
+  });
+
+  it("indexer lag on an account RPC doesn't know -> propagates", async () => {
+    const ds = {
+      ...memSource({}),
+      accountExists: async () => false,
+      getAccountInfo: async () => Promise.reject(new IndexerLagError("not indexed", { source: "NearBlocks" })),
+    };
+    await expect(ageSignal(T, ds, ctx(), policy)).rejects.toBeInstanceOf(IndexerLagError);
   });
 
   it("propagates a source failure (check turns it into unknown)", async () => {
@@ -52,6 +73,12 @@ describe("code_change", () => {
   it("deployed 30 days ago -> 0", async () => {
     const ds = memSource({ accounts: { [T]: { createdAt: null, txCount: 9, isContract: true, lastDeployAt: ago(30 * DAY) } } });
     expect((await codeChangeSignal(T, ds, ctx(), policy)).points).toBe(0);
+  });
+
+  it("a contract with no indexed deployment -> 25", async () => {
+    const ds = memSource({ accounts: { [T]: { createdAt: null, txCount: 9, isContract: true, lastDeployAt: null } } });
+    const s = await codeChangeSignal(T, ds, ctx(), policy);
+    expect(s).toMatchObject({ status: "ok", points: 25, reason: "contract deployment not yet indexed" });
   });
 
   it("not a contract -> 0", async () => {
@@ -107,15 +134,15 @@ describe("registry", () => {
     expect((await registrySignal(T, ds, ctx(), policy)).points).toBe(25);
   });
 
-  it("a reporter whose info fails weighs 0; the signal stays ok and names the reporter", async () => {
+  it("a reporter whose info fails -> unknown, naming the reporter; verified points in data", async () => {
     const ds = memSource({
       accounts: { "r1.sandbox": credible },
       reports: { [T]: [report("r1.sandbox"), report("ghost.sandbox")] },
     });
     const s = await registrySignal(T, ds, ctx(), policy);
-    expect(s.status).toBe("ok");
-    expect(s.points).toBe(25);
+    expect(s.status).toBe("unknown");
     expect(s.reason).toContain("ghost.sandbox");
+    expect(s.data).toMatchObject({ points: 25, unverifiedReporters: ["ghost.sandbox"] });
   });
 
   it("no reports -> 0", async () => {

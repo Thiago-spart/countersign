@@ -9,6 +9,14 @@ export class SourceUnavailableError extends Error {
   }
 }
 
+/** The account exists on chain (per RPC) but the indexer has no record of it yet. */
+export class IndexerLagError extends SourceUnavailableError {
+  constructor(message: string, opts: { source?: string; cause?: unknown } = {}) {
+    super(message, opts);
+    this.name = "IndexerLagError";
+  }
+}
+
 export interface AccountInfo {
   exists: boolean;
   /** null = created at genesis. */
@@ -32,8 +40,9 @@ export interface RegistryReport {
 export interface DataSource {
   /** R2: backed by RPC view_account. UNKNOWN_ACCOUNT → false; other failures throw SourceUnavailableError. */
   accountExists(id: string): Promise<boolean>;
-  /** Creation time and tx count (NearBlocks). Throws SourceUnavailableError, including on indexer lag. */
+  /** Creation time and tx count (NearBlocks). Throws SourceUnavailableError; IndexerLagError when not indexed yet. */
   getAccountInfo(id: string): Promise<AccountInfo>;
+  /** For a contract, `lastDeployAt: null` means no deployment is indexed yet (scored as a fresh deploy). */
   getCodeInfo(id: string): Promise<CodeInfo>;
   getReports(target: string): Promise<RegistryReport[]>;
   getRebutted(target: string): Promise<boolean>;

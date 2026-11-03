@@ -8,7 +8,7 @@ export { ageSignal } from "./signals/age.js";
 export { activitySignal } from "./signals/activity.js";
 export { codeChangeSignal } from "./signals/codeChange.js";
 export { firstContactSignal } from "./signals/firstContact.js";
-export { check } from "./check.js";
+export { check, UNAVAILABLE_REASON } from "./check.js";
 export { loadConfig, ConfigError, type Config } from "./config.js";
 export {
   createDataSource,
@@ -25,6 +25,7 @@ export {
   EMPTY_CODE_HASH,
   RpcClient,
   SourceUnavailableError,
+  IndexerLagError,
   type AccountInfo,
   type CodeInfo,
   type RegistryReport,

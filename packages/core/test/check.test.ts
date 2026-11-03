@@ -77,6 +77,42 @@ describe("check", () => {
     expect(n).toBe(1);
   });
 
+  describe("NearBlocks-only outage (RPC healthy) never allows", () => {
+    // RPC answers (exists, code hash); every NearBlocks-backed call (account info) fails.
+    const outage = (base: DataSource): DataSource => ({
+      ...base,
+      accountExists: async () => true,
+      getAccountInfo: async () => Promise.reject(new SourceUnavailableError("HTTP 429", { source: "NearBlocks" })),
+    });
+
+    it("a fresh account", async () => {
+      const ds = outage(memSource({ accounts: { "fresh.sandbox": fresh } }));
+      const v = await check("fresh.sandbox", ctx(), ds, policy);
+      expect(v.decision).toBe("warn");
+      expect(v.score).toBeGreaterThanOrEqual(policy.thresholds.warn);
+      expect(v.reasons).toContain("some data sources were unavailable");
+    });
+
+    it("a target with 3 reports whose reporter lookups all fail", async () => {
+      const ds = outage(
+        memSource({
+          accounts: { "bad.sandbox": aged },
+          reports: { "bad.sandbox": [report("r1.sandbox"), report("r2.sandbox"), report("r3.sandbox")] },
+        }),
+      );
+      const v = await check("bad.sandbox", ctx({ pastPayees: ["bad.sandbox"] }), ds, policy);
+      expect(v.signals.find((s) => s.id === "registry")?.status).toBe("unknown");
+      expect(v.decision).not.toBe("allow");
+      expect(v.score).toBeGreaterThanOrEqual(policy.thresholds.warn);
+    });
+
+    it("does not touch a verdict that is already warn or block", async () => {
+      const ds = outage(memSource({ accounts: { "acme-c0rp.sandbox": fresh } }));
+      const v = await check("acme-c0rp.sandbox", ctx({ trusted: ["acme-corp.sandbox"] }), ds, policy);
+      expect(v.reasons).not.toContain("some data sources were unavailable");
+    });
+  });
+
   describe("scenario values", () => {
     it("a fresh lookalike -> block", async () => {
       const ds = memSource({ accounts: { "acme-c0rp.sandbox": fresh } });
