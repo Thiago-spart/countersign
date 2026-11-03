@@ -1,0 +1,559 @@
+//! Sandbox integration tests for the vault's owner controls and approval
+//! queue (Task 2, issue #4).
+//!
+//! Agent calls are signed with a function-call access key on the vault
+//! account (receiver = vault, methods = pay/request_approval/report,
+//! allowance 1 NEAR), the same way production agents call it.
+
+use std::sync::{Arc, OnceLock};
+
+use near_api::types::{AccessKeyPermission, transaction::actions::FunctionCallPermission};
+use near_api::{AccountId, NearGas, NearToken, NetworkConfig, Signer};
+use near_sdk::json_types::U64;
+use near_sdk::serde::Deserialize;
+use near_sdk::serde_json::{Value, json};
+
+type R<T = ()> = testresult::TestResult<T>;
+type TxResult = near_api::types::transaction::result::TransactionResult;
+
+#[derive(Deserialize, Debug, PartialEq)]
+#[serde(crate = "near_sdk::serde")]
+struct Limits {
+    per_tx: NearToken,
+    daily: NearToken,
+    unknown_payee_max: NearToken,
+    registry_pending_threshold: u32,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(crate = "near_sdk::serde")]
+struct PendingPayment {
+    id: U64,
+    receiver: AccountId,
+    amount: NearToken,
+    memo: String,
+    reason: String,
+    created_at: U64,
+}
+
+fn wasm() -> &'static [u8] {
+    static WASM: OnceLock<Vec<u8>> = OnceLock::new();
+    WASM.get_or_init(|| {
+        let path =
+            cargo_near_build::build_with_cli(Default::default()).expect("cargo near build failed");
+        std::fs::read(path).expect("read wasm")
+    })
+}
+
+const AGENT_METHODS: [&str; 3] = ["pay", "request_approval", "report"];
+
+struct Env {
+    sandbox: near_sandbox::Sandbox,
+    net: NetworkConfig,
+    /// Full-access genesis key; every sandbox account created here has it.
+    signer: Arc<Signer>,
+    /// Function-call key on the vault account (the agent's key).
+    agent: Arc<Signer>,
+    vault: AccountId,
+    owner: AccountId,
+    contract: near_api::Contract,
+}
+
+impl Env {
+    async fn new() -> R<Self> {
+        let code = wasm().to_vec();
+        let sandbox = near_sandbox::Sandbox::start_sandbox().await?;
+        let net = NetworkConfig::from_rpc_url("sandbox", sandbox.rpc_addr.parse()?);
+        let signer = Signer::from_secret_key(
+            near_sandbox::config::DEFAULT_GENESIS_ACCOUNT_PRIVATE_KEY.parse()?,
+        )?;
+        let vault: AccountId = "vault.sandbox".parse()?;
+        let owner: AccountId = "owner.sandbox".parse()?;
+        for (id, bal) in [(&vault, 30), (&owner, 10)] {
+            sandbox
+                .create_account(id.clone())
+                .initial_balance(NearToken::from_near(bal))
+                .send()
+                .await?;
+        }
+        near_api::Contract::deploy(vault.clone())
+            .use_code(code)
+            .with_init_call(
+                "new",
+                json!({"owner_id": owner, "registry_id": "registry.sandbox", "limits": null}),
+            )?
+            .with_signer(signer.clone())
+            .send_to(&net)
+            .await?
+            .assert_success();
+
+        // The agent's function-call key on the vault account (ruling R3: 1 NEAR allowance).
+        let agent_sk = near_api::signer::generate_secret_key()?;
+        let agent = Signer::from_secret_key(agent_sk)?;
+        near_api::Account(vault.clone())
+            .add_key(
+                AccessKeyPermission::FunctionCall(FunctionCallPermission {
+                    allowance: Some(NearToken::from_near(1)),
+                    receiver_id: vault.to_string(),
+                    method_names: AGENT_METHODS.iter().map(|m| m.to_string()).collect(),
+                }),
+                agent.get_public_key().await?,
+            )
+            .with_signer(signer.clone())
+            .send_to(&net)
+            .await?
+            .assert_success();
+
+        Ok(Self {
+            sandbox,
+            net,
+            signer,
+            agent,
+            contract: near_api::Contract(vault.clone()),
+            vault,
+            owner,
+        })
+    }
+
+    async fn account(&self, name: &str) -> R<AccountId> {
+        let id: AccountId = format!("{name}.sandbox").parse()?;
+        self.sandbox
+            .create_account(id.clone())
+            .initial_balance(NearToken::from_near(10))
+            .send()
+            .await?;
+        Ok(id)
+    }
+
+    async fn call(&self, who: &AccountId, method: &str, args: Value) -> R<TxResult> {
+        Ok(self
+            .contract
+            .call_function(method, args)
+            .transaction()
+            .with_signer(who.clone(), self.signer.clone())
+            .send_to(&self.net)
+            .await?)
+    }
+
+    async fn owner_call(&self, method: &str, args: Value) -> R<TxResult> {
+        self.call(&self.owner.clone(), method, args).await
+    }
+
+    /// Call as the agent: the vault account, signed with the function-call key.
+    async fn agent_call(&self, method: &str, args: Value) -> R<TxResult> {
+        Ok(self
+            .contract
+            .call_function(method, args)
+            .transaction()
+            .gas(NearGas::from_tgas(30))
+            .with_signer(self.vault.clone(), self.agent.clone())
+            .send_to(&self.net)
+            .await?)
+    }
+
+    async fn request_approval(&self, receiver: &AccountId, amount: NearToken) -> R<Value> {
+        Ok(self
+            .agent_call(
+                "request_approval",
+                json!({"receiver": receiver, "amount": amount, "memo": "invoice 42",
+                       "reason": "agent asked"}),
+            )
+            .await?
+            .assert_success()
+            .json()?)
+    }
+
+    async fn view<T: near_sdk::serde::de::DeserializeOwned + Send + Sync>(
+        &self,
+        method: &str,
+        args: Value,
+    ) -> R<T> {
+        Ok(self
+            .contract
+            .call_function(method, args)
+            .read_only()
+            .fetch_from(&self.net)
+            .await?
+            .data)
+    }
+
+    async fn pending(&self) -> R<Vec<PendingPayment>> {
+        self.view("get_pending", json!({})).await
+    }
+
+    async fn spent_today(&self) -> R<NearToken> {
+        self.view("get_spent_today", json!({})).await
+    }
+
+    async fn balance(&self, who: &AccountId) -> R<NearToken> {
+        Ok(near_api::Tokens::account(who.clone())
+            .near_balance()
+            .fetch_from(&self.net)
+            .await?
+            .total)
+    }
+
+    /// Queue `amount` for `receiver` and approve it; returns the approve result.
+    async fn request_and_approve(&self, receiver: &AccountId, amount: NearToken) -> R<Value> {
+        let id = pending_id(&self.request_approval(receiver, amount).await?);
+        Ok(self
+            .owner_call("approve", json!({"id": id}))
+            .await?
+            .assert_success()
+            .json()?)
+    }
+}
+
+fn pending_id(outcome: &Value) -> U64 {
+    assert_eq!(outcome["status"], "pending", "expected pending: {outcome}");
+    U64(outcome["id"].as_str().expect("id").parse().expect("u64"))
+}
+
+fn rejected(reason: &str) -> Value {
+    json!({"status": "rejected", "reason": reason})
+}
+
+/// NEP-297 events with the given name in the logs.
+fn events(logs: &[&str], name: &str) -> Vec<Value> {
+    logs.iter()
+        .filter_map(|l| l.strip_prefix("EVENT_JSON:"))
+        .map(|j| near_sdk::serde_json::from_str::<Value>(j).expect("event json"))
+        .filter(|e| e["standard"] == "countersign" && e["version"] == "1.0.0" && e["event"] == name)
+        .collect()
+}
+
+const ONE: NearToken = NearToken::from_near(1);
+
+#[tokio::test]
+async fn init_sets_defaults() -> R {
+    let env = Env::new().await?;
+    let limits: Limits = env.view("get_limits", json!({})).await?;
+    assert_eq!(
+        limits,
+        Limits {
+            per_tx: ONE,
+            daily: NearToken::from_near(5),
+            unknown_payee_max: NearToken::from_millinear(100),
+            registry_pending_threshold: 2,
+        }
+    );
+    assert!(!env.view::<bool>("is_paused", json!({})).await?);
+    assert_eq!(env.spent_today().await?, NearToken::from_yoctonear(0));
+    assert!(env.pending().await?.is_empty());
+    // A second init is refused.
+    env.call(
+        &env.vault.clone(),
+        "new",
+        json!({"owner_id": env.owner, "registry_id": "registry.sandbox", "limits": null}),
+    )
+    .await?
+    .assert_failure();
+    Ok(())
+}
+
+#[tokio::test]
+async fn owner_methods_reject_non_owner() -> R {
+    let env = Env::new().await?;
+    let stranger = env.account("stranger").await?;
+    let bob = env.account("bob").await?;
+    let id = pending_id(&env.request_approval(&bob, ONE).await?);
+    let limits = json!({"per_tx": "1", "daily": "1", "unknown_payee_max": "1",
+                        "registry_pending_threshold": 1});
+    for (method, args) in [
+        ("pause", json!({})),
+        ("unpause", json!({})),
+        ("set_limits", json!({ "limits": limits })),
+        ("trust", json!({"account_id": stranger})),
+        ("untrust", json!({"account_id": bob})),
+        ("withdraw", json!({"amount": ONE})),
+        ("approve", json!({"id": id})),
+        ("deny", json!({"id": id})),
+    ] {
+        env.call(&stranger, method, args).await?.assert_failure();
+    }
+    // Nothing changed.
+    assert!(!env.view::<bool>("is_paused", json!({})).await?);
+    assert!(
+        !env.view::<bool>("is_trusted", json!({"account_id": stranger}))
+            .await?
+    );
+    assert_eq!(
+        env.view::<Limits>("get_limits", json!({})).await?.per_tx,
+        ONE
+    );
+    assert_eq!(env.pending().await?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn owner_config_methods_work() -> R {
+    let env = Env::new().await?;
+    let bob = env.account("bob").await?;
+    env.owner_call("trust", json!({"account_id": bob}))
+        .await?
+        .assert_success();
+    assert!(
+        env.view::<bool>("is_trusted", json!({"account_id": bob}))
+            .await?
+    );
+    env.owner_call("untrust", json!({"account_id": bob}))
+        .await?
+        .assert_success();
+    assert!(
+        !env.view::<bool>("is_trusted", json!({"account_id": bob}))
+            .await?
+    );
+    let new_limits = json!({"per_tx": NearToken::from_near(2), "daily": NearToken::from_near(10),
+                            "unknown_payee_max": NearToken::from_millinear(500),
+                            "registry_pending_threshold": 3});
+    env.owner_call("set_limits", json!({ "limits": new_limits }))
+        .await?
+        .assert_success();
+    assert_eq!(
+        env.view::<Limits>("get_limits", json!({})).await?,
+        Limits {
+            per_tx: NearToken::from_near(2),
+            daily: NearToken::from_near(10),
+            unknown_payee_max: NearToken::from_millinear(500),
+            registry_pending_threshold: 3,
+        }
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn request_approval_requires_self_predecessor() -> R {
+    let env = Env::new().await?;
+    let bob = env.account("bob").await?;
+    // Another account (even the owner) cannot queue payments.
+    let args = json!({"receiver": bob, "amount": ONE, "memo": "m", "reason": "r"});
+    env.call(&bob, "request_approval", args.clone())
+        .await?
+        .assert_failure();
+    env.owner_call("request_approval", args)
+        .await?
+        .assert_failure();
+    assert!(env.pending().await?.is_empty());
+
+    // The vault itself, through the agent's function-call key.
+    let res = env
+        .agent_call(
+            "request_approval",
+            json!({"receiver": bob, "amount": ONE, "memo": "invoice 42", "reason": "agent asked"}),
+        )
+        .await?
+        .assert_success();
+    let ev = events(&res.logs(), "payment_pending");
+    assert_eq!(ev.len(), 1, "logs: {:?}", res.logs());
+    let outcome: Value = res.json()?;
+    let id = pending_id(&outcome);
+    assert_eq!(outcome["reason"], "agent asked");
+    assert_eq!(ev[0]["data"]["id"], json!(id));
+    assert_eq!(ev[0]["data"]["receiver"], json!(bob));
+
+    let pending = env.pending().await?;
+    assert_eq!(pending.len(), 1);
+    let p = &pending[0];
+    assert_eq!((p.id, &p.receiver, p.amount), (id, &bob, ONE));
+    assert_eq!(
+        (p.memo.as_str(), p.reason.as_str()),
+        ("invoice 42", "agent asked")
+    );
+    assert!(p.created_at.0 > 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn request_approval_respects_per_tx_and_pause() -> R {
+    let env = Env::new().await?;
+    let bob = env.account("bob").await?;
+    let res = env
+        .agent_call(
+            "request_approval",
+            json!({"receiver": bob, "amount": NearToken::from_millinear(1500),
+                   "memo": "m", "reason": "r"}),
+        )
+        .await?
+        .assert_success();
+    assert_eq!(events(&res.logs(), "payment_rejected").len(), 1);
+    assert_eq!(res.json::<Value>()?, rejected("over per-tx cap"));
+
+    let res = env.owner_call("pause", json!({})).await?.assert_success();
+    assert_eq!(events(&res.logs(), "paused").len(), 1);
+    assert!(env.view::<bool>("is_paused", json!({})).await?);
+    assert_eq!(
+        env.request_approval(&bob, NearToken::from_millinear(100))
+            .await?,
+        rejected("paused")
+    );
+    assert!(env.pending().await?.is_empty());
+
+    let res = env.owner_call("unpause", json!({})).await?.assert_success();
+    assert_eq!(events(&res.logs(), "unpaused").len(), 1);
+    pending_id(
+        &env.request_approval(&bob, NearToken::from_millinear(100))
+            .await?,
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_queue_caps_at_50() -> R {
+    let env = Env::new().await?;
+    let bob = env.account("bob").await?;
+    for _ in 0..50 {
+        pending_id(
+            &env.request_approval(&bob, NearToken::from_millinear(10))
+                .await?,
+        );
+    }
+    assert_eq!(env.pending().await?.len(), 50);
+    assert_eq!(
+        env.request_approval(&bob, NearToken::from_millinear(10))
+            .await?,
+        rejected("pending queue full")
+    );
+    assert_eq!(env.pending().await?.len(), 50);
+    // Denying one frees a slot.
+    env.owner_call("deny", json!({"id": U64(0)}))
+        .await?
+        .assert_success();
+    pending_id(
+        &env.request_approval(&bob, NearToken::from_millinear(10))
+            .await?,
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn approve_pays_and_counts_daily() -> R {
+    let env = Env::new().await?;
+    let bob = env.account("bob").await?;
+    let id = pending_id(&env.request_approval(&bob, ONE).await?);
+    let before = env.balance(&bob).await?;
+    let res = env
+        .owner_call("approve", json!({"id": id}))
+        .await?
+        .assert_success();
+    let logs = res.logs();
+    let approved = events(&logs, "payment_approved");
+    let paid = events(&logs, "payment_paid");
+    assert_eq!((approved.len(), paid.len()), (1, 1), "logs: {logs:?}");
+    assert_eq!(approved[0]["data"]["id"], json!(id));
+    assert_eq!(paid[0]["data"]["receiver"], json!(bob));
+    assert_eq!(paid[0]["data"]["amount"], json!(ONE));
+    assert_eq!(
+        res.json::<Value>()?,
+        json!({"status": "paid", "receiver": bob, "amount": ONE})
+    );
+    assert_eq!(env.balance(&bob).await?, before.saturating_add(ONE));
+    assert_eq!(env.spent_today().await?, ONE);
+    assert!(env.pending().await?.is_empty());
+    // An approved id cannot be approved again.
+    env.owner_call("approve", json!({"id": id}))
+        .await?
+        .assert_failure();
+    Ok(())
+}
+
+#[tokio::test]
+async fn approve_rechecks_daily_cap() -> R {
+    let env = Env::new().await?;
+    let bob = env.account("bob").await?;
+    for amount in [ONE, ONE, ONE, ONE, NearToken::from_millinear(500)] {
+        assert_eq!(
+            env.request_and_approve(&bob, amount).await?["status"],
+            "paid"
+        );
+    }
+    assert_eq!(env.spent_today().await?, NearToken::from_millinear(4500));
+
+    let id = pending_id(&env.request_approval(&bob, ONE).await?);
+    let before = env.balance(&bob).await?;
+    let res = env
+        .owner_call("approve", json!({"id": id}))
+        .await?
+        .assert_success();
+    assert_eq!(res.json::<Value>()?, rejected("over daily cap"));
+    assert_eq!(env.balance(&bob).await?, before);
+    assert_eq!(env.spent_today().await?, NearToken::from_millinear(4500));
+    let pending = env.pending().await?;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, id);
+    Ok(())
+}
+
+#[tokio::test]
+async fn approve_when_paused_rejected() -> R {
+    let env = Env::new().await?;
+    let bob = env.account("bob").await?;
+    let id = pending_id(&env.request_approval(&bob, ONE).await?);
+    env.owner_call("pause", json!({})).await?.assert_success();
+    let before = env.balance(&bob).await?;
+    let res = env
+        .owner_call("approve", json!({"id": id}))
+        .await?
+        .assert_success();
+    assert_eq!(res.json::<Value>()?, rejected("paused"));
+    assert_eq!(env.balance(&bob).await?, before);
+    assert_eq!(env.spent_today().await?, NearToken::from_yoctonear(0));
+    assert_eq!(env.pending().await?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn deny_removes() -> R {
+    let env = Env::new().await?;
+    let bob = env.account("bob").await?;
+    let keep = pending_id(&env.request_approval(&bob, ONE).await?);
+    let id = pending_id(
+        &env.request_approval(&bob, NearToken::from_millinear(200))
+            .await?,
+    );
+    let before = env.balance(&bob).await?;
+    let res = env
+        .owner_call("deny", json!({"id": id}))
+        .await?
+        .assert_success();
+    let ev = events(&res.logs(), "payment_denied");
+    assert_eq!(ev.len(), 1, "logs: {:?}", res.logs());
+    assert_eq!(ev[0]["data"]["id"], json!(id));
+    let pending = env.pending().await?;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, keep);
+    assert_eq!(env.balance(&bob).await?, before);
+    // Unknown id.
+    env.owner_call("deny", json!({"id": id}))
+        .await?
+        .assert_failure();
+    Ok(())
+}
+
+#[tokio::test]
+async fn withdraw_sends_to_owner() -> R {
+    let env = Env::new().await?;
+    let owner_before = env.balance(&env.owner).await?;
+    let vault_before = env.balance(&env.vault).await?;
+    env.owner_call("withdraw", json!({"amount": NearToken::from_near(5)}))
+        .await?
+        .assert_success();
+    let owner_after = env.balance(&env.owner).await?;
+    let gained = owner_after.saturating_sub(owner_before);
+    // 5 NEAR minus the owner's gas.
+    assert!(
+        gained > NearToken::from_millinear(4990) && gained <= NearToken::from_near(5),
+        "owner gained {gained}"
+    );
+    let vault_after = env.balance(&env.vault).await?;
+    // The vault also earns a small gas reward from the owner's call.
+    let lost = vault_before.saturating_sub(vault_after);
+    assert!(
+        lost > NearToken::from_millinear(4990) && lost <= NearToken::from_near(5),
+        "vault lost {lost}"
+    );
+    // More than the vault holds is refused.
+    env.owner_call("withdraw", json!({"amount": NearToken::from_near(1000)}))
+        .await?
+        .assert_failure();
+    Ok(())
+}

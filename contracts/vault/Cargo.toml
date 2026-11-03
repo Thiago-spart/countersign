@@ -1,6 +1,6 @@
 [package]
 name = "vault"
-description = "cargo-near-new-project-description"
+description = "Countersign vault: holds an AI agent's funds behind limits, a pending queue and owner controls"
 version = "0.1.0"
 edition = "2024"
 resolver = "3"
