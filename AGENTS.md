@@ -44,6 +44,7 @@ A change is done only when every command above that touches the changed area pas
    - Never sign on mainnet. Mainnet is read-only.
    - Never commit secrets or print private keys. Keys go in `.env`.
    - Testnet transactions, pushing, remote install scripts and anything labelled `needs-human` need the human's explicit OK first.
+   - near-mcp tools default `networkId` to **mainnet**. Always pass `networkId: "testnet"` explicitly. Its write tools (send, create account, add/delete key, delete/export account, swap) count as testnet transactions and need the human's OK.
 4. **Contracts.**
    - Callbacks are `#[private]` and never panic.
    - Use `require!` and saturating or checked arithmetic.
