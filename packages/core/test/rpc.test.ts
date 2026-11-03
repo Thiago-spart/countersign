@@ -158,6 +158,15 @@ describe("live DataSource (RPC + NearBlocks)", () => {
     expect(calls.some((c) => c.url.includes("/contract/deployments"))).toBe(false);
   });
 
+  it("no registry configured -> hasRegistry false; the registry signal says 'no registry on this network'", async () => {
+    const { fetch } = live(fixtureJson("nearblocks/recent.account.json"));
+    const ds = createDataSource(cfg, { fetch, sleep: noSleep, cacheDir: tempCacheDir() });
+    expect(ds.hasRegistry).toBe(false);
+    expect(createDataSource({ ...cfg, registryId: "r.near" }, { fetch, sleep: noSleep, cacheDir: tempCacheDir() }).hasRegistry).toBe(true);
+    const v = await check(RECENT, ctx({ network: "mainnet" }), ds, policy);
+    expect(v.signals.find((s) => s.id === "registry")).toMatchObject({ status: "ok", points: 0, reason: "no registry on this network" });
+  });
+
   it("UNKNOWN_ACCOUNT -> accountExists false", async () => {
     const { fetch } = live({ account: [] });
     const ds = createDataSource(cfg, { fetch, sleep: noSleep, cacheDir: tempCacheDir() });

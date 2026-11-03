@@ -46,6 +46,8 @@ export interface DataSource {
   getCodeInfo(id: string): Promise<CodeInfo>;
   getReports(target: string): Promise<RegistryReport[]>;
   getRebutted(target: string): Promise<boolean>;
+  /** false when no registry is configured (mainnet): reports are not read at all. Unset counts as true. */
+  readonly hasRegistry?: boolean;
 }
 
 export type FetchFn = typeof fetch;

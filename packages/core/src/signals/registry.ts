@@ -41,6 +41,9 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R
  */
 export async function registrySignal(target: string, ds: DataSource, ctx: CheckContext, policy: Policy): Promise<Signal> {
   const r = policy.registry;
+  if (ds.hasRegistry === false) {
+    return { id: "registry", status: "ok", points: 0, reason: "no registry on this network", data: { reports: 0 } };
+  }
   const reports = await ds.getReports(target);
   if (reports.length === 0) {
     return { id: "registry", status: "ok", points: 0, reason: "no registry reports", data: { reports: 0 } };

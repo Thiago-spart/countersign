@@ -94,7 +94,11 @@ export function buildTools(agent: GuardedAgent, secrets: readonly string[] = [])
     inputSchema: {
       to: z.string().min(1).describe("payee NEAR account id"),
       amount_near: z.string().describe('amount in NEAR as a decimal string, e.g. "0.5"'),
-      memo: z.string().optional().describe("optional memo, at most 280 bytes"),
+      memo: z
+        .string()
+        .refine((s) => Buffer.byteLength(s, "utf8") <= 280, "memo must be at most 280 bytes")
+        .optional()
+        .describe("optional memo, at most 280 bytes"),
     },
     handler: async ({ to, amount_near, memo }) => {
       try {

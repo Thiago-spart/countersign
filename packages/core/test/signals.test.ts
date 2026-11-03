@@ -191,7 +191,12 @@ describe("registry", () => {
 
   it("no reports -> 0", async () => {
     const s = await registrySignal(T, memSource({}), ctx(), policy);
-    expect(s).toMatchObject({ status: "ok", points: 0 });
+    expect(s).toMatchObject({ status: "ok", points: 0, reason: "no registry reports" });
+  });
+
+  it("no registry configured (mainnet) -> ok, 0, says so instead of 'no registry reports'", async () => {
+    const s = await registrySignal(T, { ...memSource({}), hasRegistry: false }, ctx(), policy);
+    expect(s).toMatchObject({ status: "ok", points: 0, reason: "no registry on this network" });
   });
 
   it("getReports failing propagates (check turns it into unknown)", async () => {

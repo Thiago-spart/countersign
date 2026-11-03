@@ -41,6 +41,7 @@ function memoize(ds: DataSource): DataSource {
     getCodeInfo: memo((id) => ds.getCodeInfo(id)),
     getReports: memo((t) => ds.getReports(t)),
     getRebutted: memo((t) => ds.getRebutted(t)),
+    hasRegistry: ds.hasRegistry,
   };
 }
 

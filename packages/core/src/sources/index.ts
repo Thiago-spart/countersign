@@ -35,6 +35,10 @@ export class LiveSource implements DataSource {
   getRebutted(target: string): Promise<boolean> {
     return this.registry.getRebutted(target);
   }
+
+  get hasRegistry(): boolean {
+    return this.registry !== NO_REGISTRY;
+  }
 }
 
 /** Mainnet without a configured registry: there are no reports to read. */
@@ -66,6 +70,7 @@ export function createDataSource(cfg: Config, opts: DataSourceOpts = {}): DataSo
       getCodeInfo: (id) => fx.getCodeInfo(id),
       getReports: (t) => registry.getReports(t),
       getRebutted: (t) => registry.getRebutted(t),
+      hasRegistry: registry !== NO_REGISTRY,
     };
   }
 

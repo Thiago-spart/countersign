@@ -122,6 +122,18 @@ describe("safe_transfer", () => {
     expect(t).not.toMatch(/\n\s+at /);
   });
 
+  it("rejects a memo over 280 bytes before calling the agent (bytes, not characters)", async () => {
+    const agent = fakeAgent();
+    const client = await connect(agent);
+    const memo = "€".repeat(94); // 94 characters, 282 bytes
+    const r = await call(client, "safe_transfer", { to: "x.testnet", amount_near: "1", memo });
+    expect(r.isError).toBe(true);
+    expect(agent.safeTransfer).not.toHaveBeenCalled();
+    const ok = await call(client, "safe_transfer", { to: "x.testnet", amount_near: "1", memo: "€".repeat(93) });
+    expect(ok.isError).toBeFalsy();
+    expect(agent.safeTransfer).toHaveBeenCalledTimes(1);
+  });
+
   it("InvalidInputError is a plain validation error", async () => {
     const client = await connect(fakeAgent({ safeTransfer: vi.fn(async () => { throw new InvalidInputError("memo", "exceeds 280 bytes"); }) }));
     const r = await call(client, "safe_transfer", { to: "x.testnet", amount_near: "1" });
