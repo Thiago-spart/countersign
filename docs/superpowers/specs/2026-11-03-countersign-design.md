@@ -209,7 +209,7 @@ The agent replays a fixed conversation with the injection in its tool output, so
 
 ## 9. Error handling
 
-- **Signals fail closed.** A failed source is `unknown` (+10). With all six unknown the score is 60, so the verdict is `warn` and a human decides.
+- **Signals fail closed.** A failed source is `unknown` (+10). Only the network signals (age, activity, code_change, registry) can fail; with all four unknown the score is at least 40, so the verdict is `warn` and a human decides.
 - **The vault never pays without a successful registry read.** The callback releases the reservation on failure and never panics.
 - **Gas allowance.** `status` shows how much allowance the key has left, and the CLI warns below 20%. The README documents what the key can and can't do.
 - **Storage.** Payable methods measure the storage they use and refund the excess, following the `security-storage-checks` rule.
