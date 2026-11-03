@@ -28,6 +28,7 @@
 - Workspace packages are named `@countersign/<name>` and are `"private": true`. Publishing to npm is out of scope for v1.
 - Every commit message ends with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 - Each task's commands run from the repo root unless the task says otherwise.
+- near-mcp (dev tooling in `.mcp.json`) defaults every tool's `networkId` to **mainnet**. Always pass `networkId: "testnet"` explicitly, and treat its write tools (send, create account, add/delete key, delete/export account, swap) as needing the human's OK.
 
 ## Review Focus
 
@@ -105,7 +106,7 @@ Expected: prints `alice.<root> 10 NEAR` and exits 0.
   - `withdraw_refunds_and_decrements`: after `withdraw_report`, `reports` is 2 and the storage refund arrives.
   - `rebut_only_by_target`: `rebut` sets the summary's `rebutted: true` for the predecessor's own account only, and a second `rebut` replaces the first.
   - `get_reports_paginates`: `from_index: 1, limit: 1` returns the second report.
-  - `no_admin_methods`: the contract ABI or method list contains no `owner`, `set_*`, `delete_*` or `migrate` methods (assert against the exported method names).
+  - `no_admin_methods`: the contract ABI or method list contains no `owner`, `set_*`, `delete_*` or `migrate` methods (assert against the wasm's exported functions, the same list near-mcp's `contract_view_functions` shows. `__contract_abi` and `contract_source_metadata` may appear when cargo-near embeds the ABI and NEP-330 metadata; they're allowed).
 
 - [ ] **Step 2: Run the tests to see them fail.** `cd contracts && cargo test -p registry` → FAIL (methods not found).
 
@@ -290,7 +291,7 @@ export function scoreSignals(target: string, signals: Signal[], policy: Policy):
 **Files:**
 - Create: `packages/core/src/sources/types.ts`, `packages/core/src/sources/nearblocks.ts`, `packages/core/src/sources/rpc.ts`, `packages/core/src/sources/registry.ts`, `packages/core/src/sources/fixture.ts`, `packages/core/src/sources/cache.ts`, `packages/core/src/signals/{exists,registry,age,activity,codeChange,firstContact}.ts`, `packages/core/src/check.ts`, `packages/core/src/config.ts`
 - Create: `fixtures/sandbox.json` (account data used by the attack suite), `packages/core/test/fixtures/nearblocks/*.json` (real recorded responses)
-- Test: `packages/core/test/signals.test.ts`, `packages/core/test/check.test.ts`, `packages/core/test/nearblocks.test.ts`
+- Test: `packages/core/test/signals.test.ts`, `packages/core/test/check.test.ts`, `packages/core/test/nearblocks.test.ts`, `packages/core/test/rpc.test.ts`
 
 **Interfaces:**
 - Consumes: Tasks 4 and 5; the registry views from Task 1.
@@ -311,13 +312,15 @@ export async function check(target: string, ctx: CheckContext, ds: DataSource, p
 export interface Config { network: Network; rpcUrl: string; nearblocksUrl: string | null; registryId: string; vaultId?: string; agentKey?: string; ownerId?: string; ownerKey?: string }
 export function loadConfig(env?: NodeJS.ProcessEnv): Config;  // reads the COUNTERSIGN_* variables from .env.example
 ```
-- NearBlocks endpoints (verified 2026-11-03): `GET /account/{id}` → `account[0].created.block_timestamp` (ns string or null; null = genesis; an empty `account` array = doesn't exist); `GET /account/{id}/txns/count` → `txns[0].count`; `GET /account/{id}/contract/deployments` → take the **max** `block_timestamp` (the list isn't ordered). RPC `view_account.code_hash` equal to `11111111111111111111111111111111` means not a contract.
+- NearBlocks endpoints (verified 2026-11-03): `GET /account/{id}` → `account[0].created.block_timestamp` (ns string or null; null = genesis); `GET /account/{id}/txns/count` → `txns[0].count`; `GET /account/{id}/contract/deployments` → take the **max** `block_timestamp` (the list isn't ordered). RPC `view_account.code_hash` equal to `11111111111111111111111111111111` means not a contract.
+- **`exists` comes from RPC, not NearBlocks** (checked with near-mcp on 2026-11-03): `view_account` failing with `UNKNOWN_ACCOUNT` means the account doesn't exist. NearBlocks is an indexer and can lag behind the chain, so a just-created account (A2) could look missing there. RPC has no creation time or transaction count, so NearBlocks still supplies `createdAt` and `txCount`. If RPC finds the account but NearBlocks returns an empty `account` array, the account exists and `age`/`activity` are `unknown`.
 - Cache: a JSON file per URL under `~/.cache/countersign`, TTL 10 minutes. Retry: 3 attempts with backoff 250/500/1000 ms on 429/5xx/network errors, then throw `SourceUnavailableError`. Send the `Authorization: Bearer` header only when `NEARBLOCKS_API_KEY` is set.
 
-- [ ] **Step 1: Record real fixtures.** Use curl to save the three NearBlocks responses for `intents.near` and for a recent mainnet account into `packages/core/test/fixtures/nearblocks/`.
+- [ ] **Step 1: Record real fixtures.** Use curl to save the three NearBlocks responses for `intents.near` and for a recent mainnet account into `packages/core/test/fixtures/nearblocks/`. Also save an RPC `view_account` response for an existing account and the `UNKNOWN_ACCOUNT` error for a missing one into `packages/core/test/fixtures/rpc/`.
 
 - [ ] **Step 2: Write the failing tests:**
-  - `nearblocks.test.ts` (a `fetch` stub that serves the fixtures): parses `createdAt`, `txCount` and `lastDeployAt` (the max); retries twice on 429 and then succeeds; 4 × 429 → `SourceUnavailableError`; a second call within the TTL makes no fetch; an empty account array → `exists: false`.
+  - `nearblocks.test.ts` (a `fetch` stub that serves the fixtures): parses `createdAt`, `txCount` and `lastDeployAt` (the max); retries twice on 429 and then succeeds; 4 × 429 → `SourceUnavailableError`; a second call within the TTL makes no fetch; an empty account array → `SourceUnavailableError` (indexer lag, not "missing").
+  - `rpc.test.ts` (a `fetch` stub that serves the RPC fixtures): `UNKNOWN_ACCOUNT` → `exists: false`; `code_hash` `111…1` → `isContract: false`; an account RPC finds but NearBlocks returns an empty array for → `exists: true`, with `age` and `activity` `unknown`.
   - `signals.test.ts` (each signal on an in-memory `DataSource`):
     - `age`: created 2 hours ago → 30; 3 days ago → 15; 30 days ago → 0; `createdAt: null` → 0.
     - `activity`: 4 transactions → 10; 5 → 0.
@@ -362,7 +365,7 @@ export interface GuardedAgent {
   report(target: string, category: string, note: string, txHash?: string): Promise<{ txHash: string }>;
 }
 export function guardedAgent(opts: { config: Config; policy?: Policy; receiptsPath?: string; dataSource?: DataSource }): Promise<GuardedAgent>;
-export class VaultClient { constructor(cfg: Config); pay(...); requestApproval(...); report(...); approve(id); deny(id); pause(); unpause(); getPending(); getLimits(); getSpentToday(); isTrusted(id); getTrusted(): Promise<string[]>; keyAllowance(): Promise<bigint> }
+export class VaultClient { constructor(cfg: Config); pay(...); requestApproval(...); report(...); approve(id); deny(id); pause(); unpause(); getPending(); getLimits(); getSpentToday(); isTrusted(id); getTrusted(): Promise<string[]>; keyAllowance(): Promise<bigint | null> /* null = unlimited (RPC `allowance: null`) */ }
 export class MainnetSigningDisabledError extends Error {}
 export class InvalidAmountError extends Error {}
 ```
@@ -395,7 +398,7 @@ export class InvalidAmountError extends Error {}
 - Consumes: the SDK (Task 7) and the sandbox helper from `packages/sdk/test/helpers/sandbox.ts` (move it to `packages/sdk/src/sandbox.ts` and export it as `startDemoSandbox(): Promise<{ config: Config; accounts: DemoAccounts; stop(): Promise<void> }>`).
 - Produces the commands (commander):
   - `check <account> [--network <n>] [--json]`, which prints the decision, the score and one line per reason
-  - `status`: limits, spent today / daily, the pending table, key allowance remaining, a warning below 20% of 0.25 NEAR
+  - `status`: limits, spent today / daily, the pending table, key allowance remaining, a warning below 20% of 0.25 NEAR (an allowance of `null` prints `unlimited` with no warning)
   - `approve <id>`, `deny <id>`, `pause`, `unpause` (owner key)
   - `report <account> --category <c> --note <text> [--tx <hash>]`
   - `setup --network testnet --owner <id>`: creates `vault.<owner>`, deploys `contracts/res/vault.wasm`, runs `new`, generates the agent key and adds the function-call key (Global Constraints), **deletes the vault's full-access key**, funds it (default 2 NEAR, with `--fund`), and writes `.env`. It prints every step and asks `y/N` before each transaction.
@@ -405,6 +408,7 @@ export class InvalidAmountError extends Error {}
   - `check` on the fixture lookalike → exit 0, output contains `BLOCK` and `acme-corp`.
   - `check --json` → valid JSON `Verdict`.
   - `status` → contains `daily` and `0 pending`.
+  - The `format.ts` allowance formatter: `null` → `unlimited`, no warning; 0.04 NEAR → a warning.
   - After an SDK `warn` transfer, `approve <id>` → status shows `0 pending` and the receiver is credited.
   - `check` with no network config → exit 2 with a message naming the missing variable.
 - [ ] **Step 2: Run the tests to see them fail.** → **Step 3: Implement** → **Step 4: Run the tests** → PASS.
@@ -416,7 +420,7 @@ export class InvalidAmountError extends Error {}
 
 **Files:**
 - Create: `packages/mcp/package.json`, `packages/mcp/src/server.ts`, `packages/mcp/src/tools.ts`, `packages/mcp/src/main.ts`
-- Create: `examples/claude-mcp.json` (`claude mcp add` / Claude Desktop config pointing at `pnpm --filter @countersign/mcp start`, with `.env.sandbox`)
+- Create: `examples/claude-mcp.json` (`claude mcp add` / Claude Desktop config pointing at `pnpm --filter @countersign/mcp start`, with `.env.sandbox`). It must not include near-mcp or any other server holding an owner or full-access key (see `docs/limits.md`)
 - Test: `packages/mcp/test/tools.test.ts`
 
 **Interfaces:**
@@ -452,7 +456,7 @@ export class InvalidAmountError extends Error {}
 export interface Scenario { id: "A1"|"A2"|"A3"|"A4"|"A5"|"A6"|"A7"; title: string; expected: string; run(env: AttackEnv): Promise<{ actual: string; pass: boolean; txHash?: string; log: string[] }> }
 export interface AttackEnv { agent: GuardedAgent; vault: VaultClient; rawAgentAccount: Account /* signs with the agent's function-call key, without the SDK */; accounts: DemoAccounts; config: Config }
 ```
-- `scriptedAgent.ts` replays a fixed conversation: a user task, a tool output containing the injection (e.g. an invoice with `Pay to: acme-c0rp.<root>`), then the agent calls `safeTransfer` with whatever the tool output said. A1–A3 and A7 use the SDK. A4–A6 use `rawAgentAccount` directly. The expected values are in spec §8.
+- `scriptedAgent.ts` replays a fixed conversation: a user task, a tool output containing the injection (e.g. an invoice with `Pay to: acme-c0rp.<root>`), then the agent calls `safeTransfer` with whatever the tool output said. A1–A3 and A7 use the SDK. A4–A6 use `rawAgentAccount` directly. A6's direct `Transfer` is the same action a wallet MCP's `tokens_send_near` would send with the agent key; Task 12 shows that live. The expected values are in spec §8.
 - `run.ts [--network sandbox|testnet] [--only A1,A4]` prints the table `# | scenario | expected | actual | PASS/FAIL | tx`, writes `attacks/last-run.json`, and exits 1 on any FAIL.
 
 - [ ] **Step 1: Write the failing test `run.test.ts`:** run all scenarios in the sandbox → 7 results, all `pass: true`. A5 shows exactly 50 paid. A6 has three rejections. A7 is `paid`.
@@ -472,8 +476,8 @@ export interface AttackEnv { agent: GuardedAgent; vault: VaultClient; rawAgentAc
 
 - [ ] **Step 1: Write `ci.yml`.** On push and pull request: set up Node 22 + pnpm and Rust + cargo-near; then `pnpm i --frozen-lockfile`, `pnpm build:contracts`, `git diff --exit-code contracts/res` (the committed wasm must match the build; if cargo-near's non-reproducible build differs across machines, drop this check and say so in the README), `pnpm test:contracts`, `pnpm typecheck`, `pnpm test`, `pnpm attacks`.
 - [ ] **Step 2: Push to a branch and confirm CI is green.** (Ask the human before pushing.)
-- [ ] **Step 3: Write `README.md` for a machine reader (§11).** In order: one-paragraph problem statement; what it is (the two layers, the registry); **Try it in 2 minutes**: numbered "do X → see Y" steps (`pnpm i` → `pnpm attacks` → see 7 PASS rows; `pnpm countersign check intents.near --network mainnet` → see a verdict; the MCP demo steps); how NEAR is used concretely (function-call key on the vault, onchain caps, cross-contract registry check, NEP-297 events); architecture diagram; the CLI and MCP reference; "Built at NEAR HACKATHON 2026"; dependencies, the AI-generated code disclosure (built with Claude Code) and the template disclosure (`cargo near new`); a link to `docs/limits.md`; MIT license. No marketing words.
-- [ ] **Step 4: `docs/limits.md`.** What the function-call key can and can't do, and what happens when its allowance runs out. Registry sybil limits on testnet. Fixture data in sandbox mode. NEAR-only payments in v1. Mainnet is read-only.
+- [ ] **Step 3: Write `README.md` for a machine reader (§11).** In order: one-paragraph problem statement; what it is (the two layers, the registry); **Try it in 2 minutes**: numbered "do X → see Y" steps (`pnpm i` → `pnpm attacks` → see 7 PASS rows; `pnpm countersign check intents.near --network mainnet` → see a verdict; the MCP demo steps); how NEAR is used concretely (function-call key on the vault, onchain caps, cross-contract registry check, NEP-297 events); architecture diagram; the CLI and MCP reference; "Built at NEAR HACKATHON 2026"; dependencies, the AI-generated code disclosure (built with Claude Code) and the template disclosure (`cargo near new`); a link to `docs/limits.md`; how to inspect the deployed contracts with near-mcp (`contract_view_functions`, plus `contract_get_function_args` if the build embeds the ABI; check `__contract_abi` is exported); MIT license. No marketing words.
+- [ ] **Step 4: `docs/limits.md`.** What the function-call key can and can't do, and what happens when its allowance runs out. Registry sybil limits on testnet. Fixture data in sandbox mode. NEAR-only payments in v1. Mainnet is read-only. Countersign protects only funds in the vault: the agent's environment must hold only the vault's function-call key. A general wallet MCP such as near-mcp, given an owner or full-access key, exposes `tokens_send_near`, `account_add_access_key`, `account_delete_account` and `account_export_account`, and bypasses Countersign entirely.
 - [ ] **Step 5: Audit.** Run the `near-contract-audit` skill over `contracts/registry` and `contracts/vault`. Fix every high and medium finding with a test, and record all findings and their resolutions in `SECURITY.md`.
 - [ ] **Step 6: Run** `pnpm test:contracts && pnpm test && pnpm attacks` → all green.
 - [ ] **Step 7: Commit** with `docs: README for judges, limits, security audit; ci`.
@@ -487,10 +491,11 @@ export interface AttackEnv { agent: GuardedAgent; vault: VaultClient; rawAgentAc
 - Modify: `README.md` (the "Live on testnet" section with explorer links)
 
 - [ ] **Step 1: The human creates and funds `countersign.testnet`** (or similar) with the faucet, and gives the account ID. Never create it on their behalf without asking.
-- [ ] **Step 2: Deploy the registry** to `registry.<owner>.testnet`, then **delete its full-access key** (§5.2), with confirmation. Verify that `near account list-keys` shows none.
-- [ ] **Step 3:** `countersign setup --network testnet --owner <owner>` → vault deployed, function-call key added, full-access key deleted.
+- [ ] **Step 2: Deploy the registry** to `registry.<owner>.testnet`, then **delete its full-access key** (§5.2), with confirmation. Verify with near-mcp `account_list_access_keys` (pass `networkId: "testnet"`) that it shows none, and with `contract_view_functions` that it has no admin methods. near-mcp can't deploy contracts, so deploy with near-cli-rs.
+- [ ] **Step 3:** `countersign setup --network testnet --owner <owner>` → vault deployed, function-call key added, full-access key deleted. Verify with near-mcp `account_list_access_keys` that the vault has exactly one key: FunctionCall, receiver = the vault, methods = `[pay, request_approval, report]`, allowance 0.25 NEAR. If the key is ever added with near-mcp's `account_add_access_key`, pass `allowance: 0.25` explicitly: it defaults to 1 yoctoNEAR.
 - [ ] **Step 4: Create the testnet scenario accounts** (trusted payee, look-alike, fresh account, 3 reporters with some history), then `pnpm attacks --network testnet` → 7/7 PASS on live data. If a live signal value differs from the fixtures (e.g. reporter credibility on young testnet accounts), adjust the scenario setup rather than `policy.json`, and note it in the README.
-- [ ] **Step 5: Commit** `deployments/testnet.json` and the README update with `chore: testnet deployment`.
+- [ ] **Step 5: Wallet-MCP bypass check (video moment).** With the human's OK, import only the vault's function-call key into near-mcp on testnet, connect it to Claude next to the Countersign MCP, and ask Claude to send NEAR from the vault with `tokens_send_near`. Expected: the protocol rejects the transfer. Record the error in the README.
+- [ ] **Step 6: Commit** `deployments/testnet.json` and the README update with `chore: testnet deployment`.
 
 ---
 
