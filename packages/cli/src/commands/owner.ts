@@ -1,5 +1,5 @@
-import { formatNear, ReceiptLog, VaultClient } from "@countersign/sdk";
-import { cliConfig, receiptsPath } from "../context.js";
+import { formatNear, ReceiptLog, redactError, VaultClient } from "@countersign/sdk";
+import { cliConfig, receiptsPath, secretsOf } from "../context.js";
 
 export async function approveCommand(id: string): Promise<void> {
   const config = cliConfig();
@@ -11,7 +11,10 @@ export async function approveCommand(id: string): Promise<void> {
     throw new Error(`approve ${id} did not pay (${outcome.status}${detail})`);
   }
   // The payee is now a past payee (first-contact signal), so log it like an SDK payment.
-  new ReceiptLog(receiptsPath()).append({
+  console.log(`paid ${formatNear(BigInt(outcome.amount))} NEAR to ${outcome.receiver} (approved #${id}, tx ${txHash})`);
+  // The payment went through; a failed log write must not look like a failed approval.
+  try {
+    new ReceiptLog(receiptsPath()).append({
     ts: new Date().toISOString(),
     to: outcome.receiver,
     amountYocto: outcome.amount,
@@ -21,8 +24,10 @@ export async function approveCommand(id: string): Promise<void> {
       reasons: [`approved by the owner (pending #${id}${pending ? `: ${pending.reason}` : ""})`],
     },
     outcome: { status: "paid", txHash },
-  });
-  console.log(`paid ${formatNear(BigInt(outcome.amount))} NEAR to ${outcome.receiver} (approved #${id}, tx ${txHash})`);
+    });
+  } catch (e) {
+    console.error(`warning: payment succeeded but the receipt was not written: ${redactError(e, secretsOf(config)).message}`);
+  }
 }
 
 export async function denyCommand(id: string): Promise<void> {

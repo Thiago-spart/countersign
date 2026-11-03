@@ -7,8 +7,7 @@ export async function sandboxUpCommand(opts: { out?: string }): Promise<void> {
   console.log("Starting the local sandbox (first run downloads the binary)...");
   const sb = await startDemoSandbox();
   const c = sb.config;
-  // Sandbox-only throwaway keys. The owner key is included so `countersign approve` works in the demo;
-  // never reuse this layout for a real vault.
+  // Agent-side config only: nothing in this file can approve payments or change limits.
   const lines = [
     "# Written by `countersign sandbox up`. Throwaway sandbox keys; valid only while it runs.",
     `COUNTERSIGN_NETWORK=${c.network}`,
@@ -16,14 +15,21 @@ export async function sandboxUpCommand(opts: { out?: string }): Promise<void> {
     `COUNTERSIGN_REGISTRY_ID=${c.registryId}`,
     `COUNTERSIGN_VAULT_ID=${c.vaultId}`,
     `COUNTERSIGN_AGENT_KEY=${c.agentKey}`,
-    `COUNTERSIGN_OWNER_ID=${c.ownerId}`,
-    `COUNTERSIGN_OWNER_KEY=${c.ownerKey}`,
     "",
   ];
   writeFileSync(outPath, lines.join("\n"), { mode: 0o600 });
+  // The owner key goes in its own file, so the agent / MCP process is never pointed at it.
+  const ownerPath = `${outPath}.owner`;
+  writeFileSync(
+    ownerPath,
+    ["# Sandbox owner key, for approve/deny/pause/unpause/status. Do not give this file to the agent.", `COUNTERSIGN_OWNER_ID=${c.ownerId}`, `COUNTERSIGN_OWNER_KEY=${c.ownerKey}`, ""].join("\n"),
+    { mode: 0o600 },
+  );
   console.log(`Sandbox running at ${c.rpcUrl}`);
   console.log(`vault ${sb.accounts.vault}, owner ${sb.accounts.owner}, registry ${sb.accounts.registry}`);
-  console.log(`Wrote ${outPath} (mode 0600). Use it with: countersign --env-file ${outPath} status`);
+  console.log(`Wrote ${outPath} (agent config) and ${ownerPath} (owner key), both mode 0600.`);
+  console.log(`Agent side: countersign --env-file ${outPath} check <account>`);
+  console.log(`Owner side: countersign --env-file ${outPath} --owner-env ${ownerPath} approve <id>`);
   console.log("Press Ctrl-C to stop.");
 
   await new Promise<void>((resolve) => {

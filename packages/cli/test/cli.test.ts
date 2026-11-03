@@ -187,6 +187,7 @@ describe("countersign setup (against the sandbox)", { timeout: 90_000 }, () => {
       registryId: env.config.registryId,
       fund: "3",
       envPath: join(dir, ".env"),
+      recoveryDir: join(dir, "recovery"),
       out: (l: string) => out.push(l),
     };
     return { ownerId, ownerKey, out, base };
@@ -231,9 +232,9 @@ describe("countersign setup (against the sandbox)", { timeout: 90_000 }, () => {
     expect(await new VaultClient(c).isPaused()).toBe(false);
   });
 
-  it("refuses --fund below 2 NEAR before sending anything", async () => {
+  it("refuses --fund below 3 NEAR before sending anything", async () => {
     const { ownerId, base } = await setupEnv();
-    await expect(runSetup({ ...base, fund: "2.5", yes: true })).rejects.toThrow(/at least 3/);
+    await expect(runSetup({ ...base, fund: "2.5", confirm: async () => true })).rejects.toThrow(/at least 3/);
     await expect(env.provider.viewAccount({ accountId: `vault.${ownerId}` })).rejects.toThrow();
   });
 
@@ -245,19 +246,37 @@ describe("countersign setup (against the sandbox)", { timeout: 90_000 }, () => {
     expect(out.join("\n")).toMatch(/vault\./);
   });
 
-  it("never overwrites an existing .env, and never defaults to yes", async () => {
+  it("never overwrites an existing .env, and never defaults to yes (no --yes flag exists)", async () => {
     const { base } = await setupEnv();
     writeFileSync(base.envPath, "KEEP=1\n");
-    await expect(runSetup({ ...base, yes: true })).rejects.toThrow(/exists/);
+    await expect(runSetup({ ...base, confirm: async () => true })).rejects.toThrow(/exists/);
     expect(readFileSync(base.envPath, "utf8")).toBe("KEEP=1\n");
-    // No confirm callback and no --yes: the default prompt must refuse (non-TTY stdin → no).
+    // No confirm callback: the default prompt must refuse (non-TTY stdin → no).
     const { base: b2 } = await setupEnv();
     await expect(runSetup({ ...b2 })).rejects.toThrow(/aborted/i);
   });
 
+  it("keeps a 0600 recovery key until the batch succeeds, then deletes it", async () => {
+    const { ownerId, ownerKey, base } = await setupEnv();
+    const recovery = join(base.recoveryDir, `vault.${ownerId}.key`);
+    let n = 0;
+    // Say yes to the account creation, no to the batch (and no to the cleanup).
+    await expect(runSetup({ ...base, confirm: async () => ++n === 1 })).rejects.toThrow(/aborted|setup failed/);
+    expect(existsSync(recovery)).toBe(true);
+    expect(statSync(recovery).mode & 0o777).toBe(0o600);
+    expect(readFileSync(recovery, "utf8")).toMatch(/^ed25519:/);
+    expect(await env.provider.viewAccount({ accountId: `vault.${ownerId}` })).toBeTruthy(); // funded, key recoverable
+    expect(existsSync(base.envPath)).toBe(false);
+    void ownerKey;
+    // A successful run leaves no recovery file.
+    const ok = await setupEnv();
+    await runSetup({ ...ok.base, confirm: async () => true });
+    expect(existsSync(join(ok.base.recoveryDir, `vault.${ok.ownerId}.key`))).toBe(false);
+  });
+
   it("refuses mainnet", async () => {
     const { base } = await setupEnv();
-    await expect(runSetup({ ...base, network: "mainnet" as never, yes: true })).rejects.toThrow(/mainnet/);
+    await expect(runSetup({ ...base, network: "mainnet" as never, confirm: async () => true })).rejects.toThrow(/mainnet/);
   });
 });
 
@@ -276,9 +295,47 @@ describe("countersign sandbox up", { timeout: 120_000 }, () => {
     expect(statSync(out).mode & 0o777).toBe(0o600);
     const text = readFileSync(out, "utf8");
     expect(text).toContain("COUNTERSIGN_VAULT_ID=vault.sandbox");
+    expect(text).not.toMatch(/OWNER/); // agent-side file: no owner id or key
+    const ownerText = readFileSync(`${out}.owner`, "utf8");
+    expect(statSync(`${out}.owner`).mode & 0o777).toBe(0o600);
+    expect(ownerText).toContain("COUNTERSIGN_OWNER_KEY=ed25519:");
+    expect(ownerText).toContain("COUNTERSIGN_OWNER_ID=owner.sandbox");
     expect(stdout).not.toMatch(/ed25519:[1-9A-HJ-NP-Za-km-z]{80,}/);
     child.kill("SIGINT");
     expect(await exited).toBe(0);
     expect(stdout).toContain("Stopping the sandbox");
+  });
+});
+
+describe("CLI wiring", { timeout: 90_000 }, () => {
+  it("setup --network mainnet exits non-zero and sends nothing", async () => {
+    const r = await cli(["setup", "--network", "mainnet", "--owner", "someone.near"], {
+      ...sandboxEnv(),
+      COUNTERSIGN_OWNER_ID: "",
+    });
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toMatch(/mainnet/);
+    expect(existsSync(join(cwd, ".countersign"))).toBe(false);
+  });
+
+  it("setup has no --yes flag", async () => {
+    const r = await cli(["setup", "--network", "testnet", "--owner", "x.testnet", "--yes"]);
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toMatch(/unknown option/);
+  });
+
+  it("owner commands read the key from --owner-env, not from the agent env file", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "countersign-oe-"));
+    const c = sandboxEnv();
+    const agentFile = join(dir, "agent.env");
+    const ownerFile = join(dir, "owner.env");
+    const { COUNTERSIGN_OWNER_ID, COUNTERSIGN_OWNER_KEY, ...agent } = c;
+    writeFileSync(agentFile, Object.entries(agent).map(([k, v]) => `${k}=${v}`).join("\n"));
+    writeFileSync(ownerFile, `COUNTERSIGN_OWNER_ID=${COUNTERSIGN_OWNER_ID}\nCOUNTERSIGN_OWNER_KEY=${COUNTERSIGN_OWNER_KEY}\n`);
+    const noKey = await cli(["--env-file", agentFile, "pause"], null);
+    expect(noKey.code).toBe(2);
+    expect(noKey.stderr).toContain("COUNTERSIGN_OWNER_ID");
+    expect((await cli(["--env-file", agentFile, "--owner-env", ownerFile, "pause"], null)).code).toBe(0);
+    expect((await cli(["--env-file", agentFile, "--owner-env", ownerFile, "unpause"], null)).code).toBe(0);
   });
 });

@@ -29,3 +29,6 @@ receipts.jsonl
 
 # Prebuilt contracts are committed
 !contracts/res/*.wasm
+
+# Setup recovery keys (vault full-access key until the batch succeeds)
+.countersign/

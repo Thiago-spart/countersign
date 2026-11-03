@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { ConfigError } from "@countersign/core";
@@ -34,8 +35,9 @@ export interface SetupOpts {
   fund?: string;
   envPath?: string;
   wasmPath?: string;
-  /** Skip the y/N prompts (`--yes`). Without it, every transaction asks and the default is no. */
-  yes?: boolean;
+  /** Where the vault's temporary full-access key is kept until the batch succeeds (default `.countersign/recovery`). */
+  recoveryDir?: string;
+  /** Asks before each transaction. Default: a y/N terminal prompt (default no). Injected by tests only; there is no CLI flag to skip it. */
   confirm?: (question: string) => Promise<boolean>;
   out?: (line: string) => void;
 }
@@ -49,7 +51,7 @@ export interface SetupResult {
 /** Asks y/N on the terminal. Anything but y/yes is no; a non-interactive stdin is no. */
 async function promptYesNo(question: string): Promise<boolean> {
   if (!process.stdin.isTTY) {
-    console.error("not a terminal: pass --yes to run setup non-interactively");
+    console.error("not a terminal: setup needs a person to confirm each transaction");
     return false;
   }
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -74,7 +76,7 @@ export async function runSetup(opts: SetupOpts): Promise<SetupResult> {
   }
   const envPath = opts.envPath ?? ".env";
   if (existsSync(envPath)) throw new Error(`${envPath} already exists; move it away first (setup never overwrites it)`);
-  const ask = opts.confirm ?? (opts.yes ? async () => true : promptYesNo);
+  const ask = opts.confirm ?? promptYesNo;
 
   const vaultId = `vault.${opts.ownerId}`;
   const provider = new JsonRpcProvider({ url: opts.rpcUrl });
@@ -82,16 +84,31 @@ export async function runSetup(opts: SetupOpts): Promise<SetupResult> {
   const wasm = readFileSync(opts.wasmPath ?? VAULT_WASM);
   const secrets = [opts.ownerKey];
 
-  const exists = await provider.viewAccount({ accountId: vaultId }).then(() => true, () => false);
+  // Only "unknown account" means it is free; any other RPC error (network, rate limit) must not look like "free".
+  const exists = await provider.viewAccount({ accountId: vaultId }).then(
+    () => true,
+    (e: unknown) => {
+      if (e instanceof Error && e.name === "AccountDoesNotExistError") return false;
+      throw e;
+    },
+  );
   if (exists) throw new Error(`${vaultId} already exists`);
 
   const vaultKey = KeyPair.fromRandom("ed25519");
   const agentKey = KeyPair.fromRandom("ed25519");
   const secretsAll = [...secrets, vaultKey.toString(), agentKey.toString()];
 
+  // The vault's full-access key exists only in memory until the batch deletes it. Persist it first so an
+  // abort or crash after funding cannot strand the funds. Never printed; only the path is.
+  const recoveryPath = join(opts.recoveryDir ?? join(".countersign", "recovery"), `${vaultId}.key`);
+  mkdirSync(dirname(recoveryPath), { recursive: true, mode: 0o700 });
+  writeFileSync(recoveryPath, `${vaultKey.toString()}\n`, { mode: 0o600, flag: "wx" });
+
   out(`Setting up ${vaultId} on ${opts.network} (owner ${opts.ownerId}, registry ${opts.registryId})`);
+  out(`Recovery key for ${vaultId} saved to ${recoveryPath} (mode 0600) until setup finishes.`);
   out("Step 1/2: create the vault account and fund it");
   if (!(await ask(`Send a transaction from ${opts.ownerId} creating ${vaultId} with ${formatNear(fund)} NEAR?`))) {
+    rmSync(recoveryPath, { force: true }); // nothing was created yet
     throw new Error("aborted by the user; nothing was sent");
   }
   await owner.createAccount({
@@ -122,17 +139,20 @@ export async function runSetup(opts: SetupOpts): Promise<SetupResult> {
     const why = redactSecrets(e instanceof Error ? e.message : String(e), secretsAll);
     out(`  the vault batch did not complete: ${why}`);
     out(`  ${vaultId} still exists with a full-access key that only this process holds.`);
-    if (await ask(`Delete ${vaultId} and return its balance to ${opts.ownerId}?`)) {
-      await vault.deleteAccount(opts.ownerId);
-      out(`  deleted ${vaultId}`);
+    let cleanup = `; the recovery key is kept at ${recoveryPath}`;
+    try {
+      if (await ask(`Delete ${vaultId} and return its balance to ${opts.ownerId}?`)) {
+        await vault.deleteAccount(opts.ownerId);
+        out(`  deleted ${vaultId}`);
+        rmSync(recoveryPath, { force: true });
+        cleanup = "";
+      }
+    } catch (ce) {
+      cleanup = `; deleting ${vaultId} failed: ${redactSecrets(ce instanceof Error ? ce.message : String(ce), secretsAll)}${cleanup}`;
     }
-    throw new Error(`setup failed: ${why}`);
+    throw new Error(`setup failed: ${why}${cleanup}`);
   }
   out("  vault deployed, initialised, full-access key deleted");
-
-  const keys = (await provider.viewAccessKeyList({ accountId: vaultId })).keys;
-  const full = keys.filter((k) => (k.access_key.permission as unknown) === "FullAccess");
-  if (keys.length !== 1 || full.length > 0) throw new Error(`unexpected access keys on ${vaultId} after setup`);
 
   const lines = [
     "# Written by `countersign setup`. The agent's function-call key only; the owner key is not stored here.",
@@ -146,6 +166,14 @@ export async function runSetup(opts: SetupOpts): Promise<SetupResult> {
   ];
   writeFileSync(envPath, lines.join("\n"), { mode: 0o600, flag: "wx" });
   out(`Wrote ${envPath} (mode 0600; contains the agent's key, which is not printed).`);
+
+  // Verify after the key is safely on disk: if this throws, .env and the recovery file are both kept.
+  const keys = (await provider.viewAccessKeyList({ accountId: vaultId })).keys;
+  const full = keys.filter((k) => (k.access_key.permission as unknown) === "FullAccess");
+  if (keys.length !== 1 || full.length > 0) {
+    throw new Error(`unexpected access keys on ${vaultId} after setup; ${envPath} and ${recoveryPath} were kept`);
+  }
+  rmSync(recoveryPath, { force: true });
   out("Keep COUNTERSIGN_OWNER_KEY (your full-access key) in your own shell or keychain for approve / deny / pause.");
   return { vaultId, agentPublicKey: agentKey.getPublicKey().toString(), envPath };
 }
@@ -156,7 +184,6 @@ export async function setupCommand(opts: {
   owner: string;
   fund?: string;
   registry?: string;
-  yes?: boolean;
   envFile?: string;
 }): Promise<void> {
   if (opts.network === "mainnet") throw new MainnetSigningDisabledError("setup");
@@ -172,7 +199,6 @@ export async function setupCommand(opts: {
     ownerKey,
     registryId,
     fund: opts.fund,
-    yes: opts.yes,
     envPath: opts.envFile,
   });
   console.log(`Done. Vault ${res.vaultId}; run \`countersign status\` to check it.`);
