@@ -65,7 +65,7 @@ async fn wait_for_key(net: &NetworkConfig, id: &AccountId, signer: &Arc<Signer>)
     let pk = signer.get_public_key().await?;
     for _ in 0..100 {
         if near_api::Account(id.clone())
-            .access_key(pk.clone())
+            .access_key(pk)
             .at(near_api::types::Reference::Final)
             .fetch_from(net)
             .await

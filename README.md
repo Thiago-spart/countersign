@@ -12,6 +12,8 @@ Two layers and a shared registry:
 
 The agent can use it as a TypeScript SDK (`guardedAgent().safeTransfer(...)`), a CLI (`countersign`) or an MCP server with three tools.
 
+Verification covers the local sandbox (7/7), read-only mainnet scoring and a live testnet deployment with an attack run (5/7: the two failures are missing NearBlocks data, see [Live on testnet](#live-on-testnet)).
+
 ## Try it in 2 minutes
 
 Needs Node 22.22.2 or later (`engines` in `package.json`; the `near-sandbox` npm package that runs the local chain requires it; tested on 22.23.4 and 26.12.0), pnpm 12.16.1 and network access for the first run (the local NEAR sandbox binary is downloaded once). No Rust, NEAR account, funds or API keys: the prebuilt contracts are committed in `contracts/res/`.
@@ -128,11 +130,46 @@ Needs Node 22.22.2 or later (`engines` in `package.json`; the `near-sandbox` npm
 
 The MCP server refuses to start if the owner key is in its environment: `COUNTERSIGN_OWNER_KEY=x pnpm --silent --filter @countersign/mcp start --env-file .env.sandbox` → `error: COUNTERSIGN_OWNER_KEY is present in this process's environment (or in the env file). The MCP server is the agent and must never hold the owner key. ...`, exit 1.
 
+## Live on testnet
+
+Deployed on 2026-11-04 (record: [`deployments/testnet.json`](deployments/testnet.json)):
+
+| | Account | Code hash |
+|---|---|---|
+| Registry | [`registry.countersign-demo.testnet`](https://testnet.nearblocks.io/address/registry.countersign-demo.testnet) | `BHF1TWJ2t6Xq1S3Q71HDzfY7BFRrhu1wGGY6vkbTT28x` |
+| Vault | [`vault.countersign-demo.testnet`](https://testnet.nearblocks.io/address/vault.countersign-demo.testnet) | `9AuWzRywSxW9fjUZZ2AmjEW6D48kLmeFi3i6ovdDKwvJ` |
+| Owner | [`countersign-demo.testnet`](https://testnet.nearblocks.io/address/countersign-demo.testnet) | - |
+
+The code hashes equal the SHA-256 (base58) of `contracts/res/*.wasm`. The registry has no access keys ([key deletion](https://testnet.nearblocks.io/txns/HjTtXsHuoz8V3ExnMiBHzWGaVyrAwWFX1Zyj57uwCe7K)), so nobody can upgrade it. The vault has exactly one key: a function-call key with receiver = the vault, methods `pay`, `request_approval`, `report`, allowance 1 NEAR.
+
+`scripts/testnet-scenarios.sh <owner>` creates the scenario accounts under the owner (`acme-corp`, `acme-c0rp`, `fresh-invoice`, `reported`, `unknown-payee`, 3 reporters), files the 3 reports and trusts `acme-corp`. `pnpm attacks --network testnet` (needs `COUNTERSIGN_ATTACK_ROOT` in `.env`) then gave **5/7 PASS**:
+
+| # | expected | actual on testnet | |
+|---|---|---|---|
+| A1 | block (lookalike) | block (lookalike +45, score 90) → refused | PASS |
+| A2 | warn → Pending | warn (age +30, score 45) → pending | PASS |
+| A3 | block (registry) | warn (registry +10 from 3 reports, score 55) → pending | FAIL |
+| A4 | Pending(registry_flagged), not paid | Pending(registry_flagged), not paid ([tx](https://testnet.nearblocks.io/txns/DxGKo9o7bJDBSMYUkExjcMsPYX4YNmVVE1YcLFAmGiAB)) | PASS |
+| A5 | 50 paid (5 NEAR), then over daily cap | 50 paid (5 NEAR), 10 rejected (over daily cap) ([tx](https://testnet.nearblocks.io/txns/7G9GBbrBgpzuxbjL8yEKzow4eg2m8C7sc5hGeBpicQxf)) | PASS |
+| A6 | all rejected by the protocol | RequiresFullAccess, MethodNameMismatch, DepositWithFunctionCall, MethodNameMismatch | PASS |
+| A7 | allow → Paid | warn (score 30) → pending | FAIL |
+
+Both failures come from missing data, not from a wrong decision. NearBlocks' testnet API had not indexed the scenario accounts hours after they were created, and then answered HTTP 429 to every request. Without age and activity data, the SDK can't weigh the reporters (A3: 3 reports count +10 instead of +75) and adds unknown points to the trusted payee (A7: score 30, the warn threshold). Unknown data never lowers a verdict below `warn` ([Limits](#limits)), so both payments went to Pending for the owner instead of being paid or refused. The checks the vault enforces on-chain (A4, A5, A6) need no indexer and passed.
+
+**Wallet-MCP bypass check.** With only the vault's agent key in near-mcp's keystore (`~/.near-keystore/testnet/`), Claude called near-mcp `tokens_send_near` from `vault.countersign-demo.testnet` on testnet. Both attempts were rejected before anything moved; the vault and receiver balances were unchanged:
+
+| Amount | Rejected with |
+|---|---|
+| 1 NEAR | `Access Key {account_id}:{public_key} does not have enough balance 0.9591771640516161 for transaction costing 1.000245500818749983222784`: the agent key's 1 NEAR gas allowance is checked first and is smaller than the transfer |
+| 0.1 NEAR | `The transaction contains more then one action, but it was signed with an access key which allows transaction to apply only one specific action. To apply more then one actions TX must be signed with a full access key`: near-js's text for the protocol error `RequiresFullAccess`, the same error A6 gets. A function-call key can't sign a `Transfer` |
+
+A wallet MCP holding only the agent key can't move vault funds. It can still call `pay`, which goes through the vault's limits. A wallet MCP holding an owner or full-access key bypasses Countersign ([Limits](#limits)).
+
 ## How NEAR is used
 
 - **Function-call access key as the agent's only key.** The key lives on the vault account with receiver = the vault, methods = `pay`, `request_approval`, `report`, allowance 1 NEAR. The protocol, not Countersign, refuses everything else: a direct transfer fails with `RequiresFullAccess`, other methods with `MethodNameMismatch`, any attached deposit with `DepositWithFunctionCall` (attack A6).
 - **Limits enforced in the contract.** `pay` checks pause, per-transaction cap (1 NEAR), the vault's free balance and the daily cap (5 NEAR per UTC day), reserving the amount before any cross-contract call. Untrusted payees above 0.1 NEAR and payees with 2 or more registry reports go to a pending queue (max 50) for the owner. This holds when the agent skips the SDK (A4, A5).
-- **Cross-contract registry check.** `pay` calls `registry.get_summary(receiver)`, then the private callback `on_registry_summary` decides, transfers, and `on_transfer_done` records the result. Callbacks never panic, and every non-paid branch releases the reservation. A failed or malformed registry response rejects the payment ("registry unavailable").
+- **Cross-contract registry check.** `pay` calls `registry.get_summary(receiver)`, then the private callback `on_registry_summary` checks pause again before deciding whether to transfer, and `on_transfer_done` records the result. Callbacks never panic, and every non-paid branch releases the reservation. A failed or malformed registry response rejects the payment ("registry unavailable"). Pause also rejects payments still waiting for the registry; it cannot recall transfers already dispatched.
 - **1 yoctoNEAR owner gate.** `approve`, `unpause`, `set_limits`, `trust`, `untrust` and `withdraw` require exactly 1 yoctoNEAR, which only a full-access key can attach. `pause` and `deny` are deposit-free so an emergency stop has no friction.
 - **No full-access key on the vault.** `countersign setup` deploys the code, calls `new`, adds the agent key and deletes the vault's full-access key in one batch transaction, so nobody can redeploy or drain the vault outside its methods.
 - **Storage staking.** The registry keeps the measured storage cost of each report from the deposit (min 0.01 NEAR) and refunds the rest, and refunds the freed storage on withdrawal. The vault's code stake is about 1.95 NEAR, so `setup` funds at least 3 NEAR.
@@ -201,6 +238,8 @@ Under 30 is `allow`, 30–69 `warn`, 70 or more `block`. If any network-backed s
 | `setup --network testnet --owner <id> [--fund <near>] [--registry <id>]` | Create `vault.<owner>` on testnet with at least 3 NEAR, deploy and init it, add the agent key, delete its full-access key, write `.env` (no owner key). Asks y/N before each transaction. |
 | `sandbox up [--out <path>]` | Local sandbox with the registry, a vault and the fixture accounts; writes `.env.sandbox` and `.env.sandbox.owner`. |
 
+`setup` saves both generated keys privately before funding and reconciles the vault's on-chain keys after an uncertain batch result. If setup is interrupted or the final env file cannot be written, keep `.countersign/recovery/` and follow [Setup recovery](docs/limits.md#setup-recovery); the temporary full-access key may already have been deleted on-chain.
+
 ## MCP reference
 
 `examples/claude-mcp.json` starts `pnpm --silent --filter @countersign/mcp start --env-file .env.sandbox`. Tools:
@@ -261,7 +300,7 @@ Full list: [docs/limits.md](docs/limits.md). In short:
 - **What the key can't do:** transfer directly, call any vault method other than `pay` / `request_approval` / `report`, attach a deposit, or manage keys. When its 1 NEAR gas allowance runs out, the agent's transactions are rejected before the contract runs and nothing moves; the vault then has to be replaced (its full-access key was deleted).
 - **The registry has no on-chain sybil resistance.** Any 2 accounts can send payments to a payee into Pending. Reporter credibility is weighed off-chain only.
 - **Sandbox mode uses fixture data** (`fixtures/sandbox.json`) for account age, activity and deploys; registry reports are read from the sandbox registry.
-- **NEAR only** in v1 (no fungible tokens). **Mainnet is read-only**: `check` works, nothing is signed. The registry is on testnet only.
+- **NEAR only** in v1 (no fungible tokens). **Mainnet is read-only**: `check` works, nothing is signed. Public-network registry reporting is intended for testnet ([deployed](#live-on-testnet)); no mainnet registry is configured.
 - **Splitting under the caps works**: an agent can pay an unknown account 0.1 NEAR at a time until the 5 NEAR daily cap (A5).
 
 ## Security
@@ -272,9 +311,13 @@ Full list: [docs/limits.md](docs/limits.md). In short:
 
 Built for NEAR HACKATHON 2026. Design spec: `docs/superpowers/specs/2026-11-03-countersign-design.md`; implementation plan: `docs/superpowers/plans/2026-11-03-countersign.md`.
 
+The [submission checklist](docs/submission-checklist.md) contains a draft X post and a 60–90 second video script. Recording, publishing and final submission remain human steps; the draft is not evidence of a completed demo post.
+
 ### AI-generated code
 
 Built with Claude Code (Anthropic). Most of the code, tests and documentation in this repository were generated by Claude Code agents working from the design spec and implementation plan above, directed by the author. Commits made this way carry a `Co-Authored-By: Claude` trailer.
+
+The follow-up security fixes used Claude Code workers, with Codex reviewing, integrating and verifying the changes.
 
 ### Templates
 

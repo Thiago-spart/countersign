@@ -4,9 +4,9 @@ import type { Config } from "../src/config.js";
 import { loadPolicy } from "../src/policy.js";
 import { createDataSource } from "../src/sources/index.js";
 import { RegistrySource } from "../src/sources/registry.js";
-import { RpcClient } from "../src/sources/rpc.js";
+import { EMPTY_CODE_HASH, RpcClient } from "../src/sources/rpc.js";
 import { SourceUnavailableError } from "../src/sources/types.js";
-import { ctx, fixtureJson, noSleep, stubFetch, tempCacheDir, type StubResponse } from "./helpers.js";
+import { NOW, ctx, fixtureJson, noSleep, stubFetch, tempCacheDir, type StubResponse } from "./helpers.js";
 
 const RPC = "https://free.rpc.fastnear.com";
 const RECENT = "u_28242dae5307e280.escrow.uprail.near";
@@ -206,6 +206,51 @@ describe("live DataSource (RPC + NearBlocks)", () => {
     const ds = createDataSource(cfg, { fetch, sleep: noSleep, cacheDir: tempCacheDir() });
     const v = await check("intents.near", ctx({ network: "mainnet", pastPayees: ["intents.near"] }), ds, policy);
     expect(v.signals.find((s) => s.id === "code_change")).toMatchObject({ status: "ok", points: 0 });
+  });
+
+  it("a redeploy (new code hash) scores code_change +25 even while the old deploy time is cached and still indexed", async () => {
+    const id = "c.near";
+    const hash = { current: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" };
+    const sixtyDaysAgo = `${BigInt(NOW.getTime() - 60 * 86_400_000) * 1_000_000n}`;
+    const { fetch } = stubFetch((url) => {
+      if (url === RPC) return { body: { jsonrpc: "2.0", id: "x", result: { code_hash: hash.current } } };
+      if (url.endsWith("/contract/deployments")) return { body: { deployments: [{ transaction_hash: "t", block_timestamp: sixtyDaysAgo }] } };
+      if (url.endsWith("/txns/count")) return { body: { txns: [{ count: "500" }] } };
+      return { body: { account: [{ account_id: id, created: { block_timestamp: sixtyDaysAgo } }] } };
+    });
+    const opts = { fetch, sleep: noSleep, cacheDir: tempCacheDir(), now: () => NOW };
+    const codeChange = async () =>
+      (await check(id, ctx({ network: "mainnet", pastPayees: [id] }), createDataSource(cfg, opts), policy)).signals.find(
+        (s) => s.id === "code_change",
+      );
+    expect((await codeChange())?.points).toBe(0);
+    hash.current = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+    expect(await codeChange()).toMatchObject({ status: "ok", points: 25 });
+  });
+
+  it("the same code redeployed after the contract was removed (A -> no code -> A) scores code_change +25", async () => {
+    const id = "c.near";
+    const A = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const hash = { current: A };
+    const sixtyDaysAgo = `${BigInt(NOW.getTime() - 60 * 86_400_000) * 1_000_000n}`;
+    let deploymentCalls = 0;
+    const { fetch } = stubFetch((url) => {
+      if (url === RPC) return { body: { jsonrpc: "2.0", id: "x", result: { code_hash: hash.current } } };
+      if (url.endsWith("/contract/deployments")) {
+        deploymentCalls++;
+        return { body: { deployments: [{ transaction_hash: "t", block_timestamp: sixtyDaysAgo }] } };
+      }
+      if (url.endsWith("/txns/count")) return { body: { txns: [{ count: "500" }] } };
+      return { body: { account: [{ account_id: id, created: { block_timestamp: sixtyDaysAgo } }] } };
+    });
+    const opts = { fetch, sleep: noSleep, cacheDir: tempCacheDir(), now: () => NOW };
+    expect((await createDataSource(cfg, opts).getCodeInfo(id)).isContract).toBe(true);
+    hash.current = EMPTY_CODE_HASH;
+    expect(await createDataSource(cfg, opts).getCodeInfo(id)).toEqual({ isContract: false, lastDeployAt: null });
+    expect(deploymentCalls).toBe(1);
+    hash.current = A;
+    const v = await check(id, ctx({ network: "mainnet", pastPayees: [id] }), createDataSource(cfg, opts), policy);
+    expect(v.signals.find((s) => s.id === "code_change")).toMatchObject({ status: "ok", points: 25 });
   });
 
   it("NearBlocks-only outage (RPC healthy) never allows", async () => {

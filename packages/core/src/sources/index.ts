@@ -24,8 +24,11 @@ export class LiveSource implements DataSource {
 
   async getCodeInfo(id: string): Promise<CodeInfo> {
     const view = await this.rpc.viewAccount(id);
-    if (!view || view.codeHash === EMPTY_CODE_HASH) return { isContract: false, lastDeployAt: null };
-    return { isContract: true, lastDeployAt: await this.nearblocks.getLastDeployAt(id) };
+    if (!view || view.codeHash === EMPTY_CODE_HASH) {
+      await this.nearblocks.getLastDeployAt(id, EMPTY_CODE_HASH); // records "no code"; no request
+      return { isContract: false, lastDeployAt: null };
+    }
+    return { isContract: true, lastDeployAt: await this.nearblocks.getLastDeployAt(id, view.codeHash) };
   }
 
   getReports(target: string): Promise<RegistryReport[]> {
@@ -79,6 +82,7 @@ export function createDataSource(cfg: Config, opts: DataSourceOpts = {}): DataSo
     baseUrl: cfg.nearblocksUrl,
     apiKey: cfg.nearblocksApiKey,
     cache: new DiskCache({ dir: opts.cacheDir ?? cfg.cacheDir }),
+    now: opts.now,
     ...http,
   });
   return new LiveSource(rpc, nearblocks, registry);

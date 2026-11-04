@@ -434,7 +434,11 @@ async fn get_trusted_lists_trusted_accounts() -> R {
     let env = Env::new().await?;
     let bob = env.account("bob").await?;
     let carol = env.account("carol").await?;
-    assert!(env.view::<Vec<String>>("get_trusted", json!({})).await?.is_empty());
+    assert!(
+        env.view::<Vec<String>>("get_trusted", json!({}))
+            .await?
+            .is_empty()
+    );
     for a in [&bob, &carol] {
         env.owner_call("trust", json!({"account_id": a}))
             .await?

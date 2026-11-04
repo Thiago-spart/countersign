@@ -67,8 +67,9 @@ impl Contract {
     /// Pay `receiver` from the vault (agent key only). Checks, in order: at
     /// least 40 TGas and a memo of at most 280 bytes (panics), then zero
     /// amount, pause, per-tx cap and free balance (`Rejected`), then reserves
-    /// against the daily cap; the registry check, unknown-payee cap and a
-    /// second balance check run in `on_registry_summary`. Returns `Paid`,
+    /// against the daily cap; a second pause check, the registry check,
+    /// unknown-payee cap and a second balance check run in
+    /// `on_registry_summary`. Returns `Paid`,
     /// `Pending`, `Rejected` or `Failed` (the transfer itself failed).
     pub fn pay(
         &mut self,
@@ -185,6 +186,12 @@ impl Contract {
             return PromiseOrValue::Value(PayOutcome::Rejected {
                 reason: NOT_A_CALLBACK.to_string(),
             });
+        }
+        // The owner may have paused while the registry read was in flight.
+        // Reject rather than queue: a queued payment would outlive the pause.
+        if self.paused {
+            self.release(reserved_day, amount);
+            return PromiseOrValue::Value(self.reject(None, receiver, amount, "paused"));
         }
         // Read the result by hand: `#[callback_result]` would panic on a
         // malformed response, stranding the reservation.
@@ -456,5 +463,139 @@ mod tests {
             "no events: {:?}",
             get_logs()
         );
+    }
+
+    const NOW: u64 = 1_000;
+
+    fn owner() -> AccountId {
+        "owner.near".parse().unwrap()
+    }
+
+    fn bob() -> AccountId {
+        "bob.near".parse().unwrap()
+    }
+
+    fn ctx_as(predecessor: AccountId) -> near_sdk::VMContext {
+        VMContextBuilder::new()
+            .current_account_id(vault())
+            .predecessor_account_id(predecessor)
+            .account_balance(NearToken::from_near(10))
+            .block_timestamp(NOW)
+            .prepaid_gas(Gas::from_tgas(300))
+            .build()
+    }
+
+    /// `pay` as the agent (reserves `amount`, starts the registry read);
+    /// then, if `pause`, the owner pauses before the summary arrives.
+    fn pay_then(pause: bool, amount: NearToken) -> Contract {
+        testing_env!(ctx_as(vault()));
+        let mut c = Contract::new(owner(), "registry.near".parse().unwrap(), None);
+        let out = c.pay(bob(), amount, "m".into());
+        assert!(
+            matches!(out, PromiseOrValue::Promise(_)),
+            "pay must call the registry"
+        );
+        assert_eq!(c.get_spent_today(), amount);
+        if pause {
+            testing_env!(ctx_as(owner()));
+            c.pause();
+        }
+        c
+    }
+
+    /// Deliver `result` to `on_registry_summary` as the vault's own callback.
+    fn summary_arrives(
+        c: &mut Contract,
+        result: PromiseResult,
+        amount: NearToken,
+    ) -> PromiseOrValue<PayOutcome> {
+        testing_env!(
+            ctx_as(vault()),
+            near_sdk::test_vm_config(),
+            near_sdk::RuntimeFeesConfig::test(),
+            Default::default(),
+            vec![result],
+        );
+        c.on_registry_summary(bob(), amount, "m".into(), limits::day_of(NOW))
+    }
+
+    fn summary(reports: u32) -> PromiseResult {
+        PromiseResult::Successful(
+            format!(r#"{{"reports":{reports},"first_seen":"1","last_seen":"2","rebutted":false}}"#)
+                .into_bytes(),
+        )
+    }
+
+    fn assert_paused_rejection(c: &Contract, out: PromiseOrValue<PayOutcome>) {
+        let PromiseOrValue::Value(out) = out else {
+            panic!("paused: must not schedule a transfer")
+        };
+        assert_eq!(
+            out,
+            PayOutcome::Rejected {
+                reason: "paused".into()
+            }
+        );
+        assert_eq!(
+            c.get_spent_today(),
+            NearToken::from_yoctonear(0),
+            "not released"
+        );
+        assert!(c.get_pending().is_empty(), "paused: must not enqueue");
+        assert!(get_logs().iter().any(|l| l.contains("payment_rejected")));
+    }
+
+    /// Owner pauses while the registry read is in flight: a clean summary
+    /// must not lead to a transfer.
+    #[test]
+    fn pause_during_registry_read_rejects_clean_payment() {
+        let amount = NearToken::from_millinear(50);
+        let mut c = pay_then(true, amount);
+        let out = summary_arrives(&mut c, summary(0), amount);
+        assert_paused_rejection(&c, out);
+    }
+
+    /// Paused with a flagged receiver or an over-cap unknown payee: rejected,
+    /// not queued (approving later would bypass the pause decision).
+    #[test]
+    fn pause_during_registry_read_does_not_enqueue() {
+        let mut c = pay_then(true, NearToken::from_millinear(50));
+        let out = summary_arrives(&mut c, summary(5), NearToken::from_millinear(50));
+        assert_paused_rejection(&c, out);
+
+        let big = NearToken::from_millinear(500);
+        let mut c = pay_then(true, big);
+        let out = summary_arrives(&mut c, summary(0), big);
+        assert_paused_rejection(&c, out);
+    }
+
+    /// Paused and the registry call failed: still released, reason `paused`.
+    #[test]
+    fn pause_during_registry_read_with_failed_registry() {
+        let amount = NearToken::from_millinear(50);
+        let mut c = pay_then(true, amount);
+        let out = summary_arrives(&mut c, PromiseResult::Failed, amount);
+        assert_paused_rejection(&c, out);
+    }
+
+    /// Unpaused behaviour is unchanged: clean → transfer, flagged → queued.
+    #[test]
+    fn unpaused_summary_still_pays_or_queues() {
+        let amount = NearToken::from_millinear(50);
+        let mut c = pay_then(false, amount);
+        let out = summary_arrives(&mut c, summary(0), amount);
+        assert!(
+            matches!(out, PromiseOrValue::Promise(_)),
+            "expected a transfer"
+        );
+        assert_eq!(c.get_spent_today(), amount, "reservation kept until paid");
+
+        let mut c = pay_then(false, amount);
+        let PromiseOrValue::Value(out) = summary_arrives(&mut c, summary(5), amount) else {
+            panic!("flagged: expected a value")
+        };
+        assert!(matches!(out, PayOutcome::Pending { .. }), "{out:?}");
+        assert_eq!(c.get_pending().len(), 1);
+        assert_eq!(c.get_spent_today(), NearToken::from_yoctonear(0));
     }
 }

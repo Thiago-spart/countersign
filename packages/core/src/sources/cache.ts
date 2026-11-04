@@ -35,11 +35,12 @@ export class DiskCache {
     return join(this.dir, `${createHash("sha256").update(url).digest("hex")}.json`);
   }
 
-  get(url: string): unknown {
+  /** `ttlMs` overrides the cache-wide TTL for this read (e.g. Infinity for state that must persist). */
+  get(url: string, ttlMs: number = this.ttlMs): unknown {
     try {
       const e = JSON.parse(readFileSync(this.file(url), "utf8")) as Entry;
       const age = this.now() - e.storedAt;
-      if (e.url !== url || !(age >= 0 && age <= this.ttlMs)) return undefined;
+      if (e.url !== url || !(age >= 0 && age <= ttlMs)) return undefined;
       return e.body;
     } catch {
       return undefined;

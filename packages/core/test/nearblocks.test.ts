@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { DiskCache } from "../src/sources/cache.js";
 import { NearBlocksClient } from "../src/sources/nearblocks.js";
+import { EMPTY_CODE_HASH } from "../src/sources/rpc.js";
 import { IndexerLagError, SourceUnavailableError } from "../src/sources/types.js";
 import { fixtureJson, noSleep, stubFetch, tempCacheDir, type StubResponse } from "./helpers.js";
 
@@ -190,5 +191,123 @@ describe("NearBlocksClient retry and cache", () => {
     const { fetch, calls } = stubFetch(() => ({ body: { deployments: [] } }));
     await client(fetch).getLastDeployAt("a/../b.near");
     expect(calls[0]!.url).toBe(`${BASE}/account/a%2F..%2Fb.near/contract/deployments`);
+  });
+});
+
+describe("NearBlocksClient.getLastDeployAt with the observed code hash", () => {
+  const OBSERVED = new Date("2026-11-03T12:00:00Z");
+  const OLD = new Date("2026-09-04T12:00:00Z"); // 60 days before OBSERVED
+  const MID = new Date("2026-10-04T12:00:00Z"); // 30 days before OBSERVED
+  const NEW = new Date("2026-11-03T11:55:00Z"); // just before OBSERVED
+  const LATER = new Date("2026-11-03T12:30:00Z");
+  const ns = (d: Date) => `${BigInt(d.getTime()) * 1_000_000n}`;
+
+  /** NearBlocks whose deployments list can be changed between calls. */
+  function indexer(initial: Date | null) {
+    const state = { last: initial };
+    const stub = stubFetch(() => ({
+      body: { deployments: state.last ? [{ transaction_hash: "t", block_timestamp: ns(state.last) }] : [] },
+    }));
+    return { state, ...stub };
+  }
+  const clock = { now: OBSERVED };
+  beforeEach(() => {
+    clock.now = OBSERVED;
+  });
+  const hashClient = (f: typeof fetch, dir: string) =>
+    client(f, { cache: new DiskCache({ dir, now: () => clock.now.getTime() }), now: () => clock.now });
+
+  it("same hash: served from the cache within the TTL", async () => {
+    const { fetch, calls } = indexer(OLD);
+    const nb = hashClient(fetch, tempCacheDir());
+    expect(await nb.getLastDeployAt("c.near", "A")).toEqual(OLD);
+    expect(await nb.getLastDeployAt("c.near", "A")).toEqual(OLD);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("a changed hash bypasses the cached deployment time", async () => {
+    const ix = indexer(OLD);
+    const nb = hashClient(ix.fetch, tempCacheDir());
+    expect(await nb.getLastDeployAt("c.near", "A")).toEqual(OLD);
+    ix.state.last = LATER;
+    expect(await nb.getLastDeployAt("c.near", "B")).toEqual(LATER);
+    expect(ix.calls).toHaveLength(2);
+  });
+
+  it("a changed hash -> at least the observation time, even once the indexer shows a deploy just before it", async () => {
+    const ix = indexer(OLD);
+    const nb = hashClient(ix.fetch, tempCacheDir());
+    await nb.getLastDeployAt("c.near", "A");
+    expect(await nb.getLastDeployAt("c.near", "B")).toEqual(OBSERVED);
+    // Still lagging on the next check: the refetched old timestamp is not trusted.
+    expect(await nb.getLastDeployAt("c.near", "B")).toEqual(OBSERVED);
+    // An indexed deploy can't be tied to B; the observation stays a lower bound.
+    ix.state.last = NEW;
+    expect(await nb.getLastDeployAt("c.near", "B")).toEqual(OBSERVED);
+  });
+
+  it("a deploy indexed after the observed change supersedes it (after the cache TTL)", async () => {
+    const ix = indexer(OLD);
+    const nb = hashClient(ix.fetch, tempCacheDir());
+    await nb.getLastDeployAt("c.near", "A");
+    expect(await nb.getLastDeployAt("c.near", "B")).toEqual(OBSERVED);
+    ix.state.last = LATER;
+    clock.now = new Date(LATER.getTime() + 11 * 60_000);
+    expect(await nb.getLastDeployAt("c.near", "B")).toEqual(LATER);
+  });
+
+  it("an indexer advancing to a different, still-old deploy does not clear the observed change", async () => {
+    const ix = indexer(OLD);
+    const dir = tempCacheDir();
+    const nb = hashClient(ix.fetch, dir);
+    await nb.getLastDeployAt("c.near", "A");
+    ix.state.last = MID;
+    expect(await nb.getLastDeployAt("c.near", "B")).toEqual(OBSERVED);
+    expect(await nb.getLastDeployAt("c.near", "B")).toEqual(OBSERVED);
+    expect(await hashClient(ix.fetch, dir).getLastDeployAt("c.near", "B")).toEqual(OBSERVED);
+  });
+
+  it("the hash change is remembered across client and cache recreation", async () => {
+    const ix = indexer(OLD);
+    const dir = tempCacheDir();
+    await hashClient(ix.fetch, dir).getLastDeployAt("c.near", "A");
+    expect(await hashClient(ix.fetch, dir).getLastDeployAt("c.near", "B")).toEqual(OBSERVED);
+    expect(await hashClient(ix.fetch, dir).getLastDeployAt("c.near", "B")).toEqual(OBSERVED);
+  });
+
+  it("changing back to an earlier hash is still a change", async () => {
+    const ix = indexer(OLD);
+    const nb = hashClient(ix.fetch, tempCacheDir());
+    await nb.getLastDeployAt("c.near", "A");
+    ix.state.last = NEW;
+    expect(await nb.getLastDeployAt("c.near", "B")).toEqual(OBSERVED);
+    // A redeployed later; the indexer still shows B's deploy as the latest.
+    clock.now = LATER;
+    expect(await nb.getLastDeployAt("c.near", "A")).toEqual(LATER);
+  });
+
+  it("A -> no code -> A is a change; the no-code check makes no NearBlocks request", async () => {
+    const ix = indexer(OLD);
+    const nb = hashClient(ix.fetch, tempCacheDir());
+    expect(await nb.getLastDeployAt("c.near", "A")).toEqual(OLD);
+    expect(await nb.getLastDeployAt("c.near", EMPTY_CODE_HASH)).toBeNull();
+    expect(ix.calls).toHaveLength(1);
+    clock.now = LATER;
+    expect(await nb.getLastDeployAt("c.near", "A")).toEqual(LATER);
+  });
+
+  it("a hash change on a contract with no indexed deployment is not reported as null (genesis)", async () => {
+    const ix = indexer(null);
+    const nb = hashClient(ix.fetch, tempCacheDir());
+    expect(await nb.getLastDeployAt("c.near", "A")).toBeNull();
+    expect(await nb.getLastDeployAt("c.near", "B")).toEqual(OBSERVED);
+  });
+
+  it("the first observation of an account ignores a cached deployment time", async () => {
+    const ix = indexer(OLD);
+    const dir = tempCacheDir();
+    await hashClient(ix.fetch, dir).getLastDeployAt("c.near"); // no hash: plain cached read
+    ix.state.last = NEW;
+    expect(await hashClient(ix.fetch, dir).getLastDeployAt("c.near", "B")).toEqual(NEW);
   });
 });
