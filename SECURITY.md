@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Open an issue on this repository. This repository verifies local sandbox deployments; no verified public testnet deployment is recorded yet. Mainnet signing is disabled in v1.
+Open an issue on this repository. This repository verifies local sandbox deployments and one testnet deployment (README, "Live on testnet"). Mainnet signing is disabled in v1.
 
 ## Scope
 

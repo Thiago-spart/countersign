@@ -9,7 +9,7 @@ The project fits `security`, with `agents` and `open` as additional tracks for t
 - Run the commands in the README against the final code and retain their output. The seven scripted attacks verify the SDK, contracts and protocol; they do not verify an LLM's behavior.
 - Record the actual Claude/MCP interaction below. The owner key and setup recovery files must be outside the agent's accessible environment. Give the model only the Countersign MCP tools, with no file, shell or general-wallet tools that could reach owner credentials.
 - Check the recording for keys, owner environment-file contents and personal information before publishing.
-- Keep the repository public through judging. No verified public testnet deployment is currently recorded; describe the demo as a local NEAR sandbox run.
+- Keep the repository public through judging. A testnet deployment is recorded in `deployments/testnet.json` (live attack run 5/7, see README "Live on testnet"); the 7/7 demo is the local NEAR sandbox run.
 
 ## X post draft
 

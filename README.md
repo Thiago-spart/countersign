@@ -12,7 +12,7 @@ Two layers and a shared registry:
 
 The agent can use it as a TypeScript SDK (`guardedAgent().safeTransfer(...)`), a CLI (`countersign`) or an MCP server with three tools.
 
-Verification currently covers the local sandbox and read-only mainnet scoring. No verified public testnet deployment or live testnet attack run is recorded in this repository. `setup --network testnet` supports deploying a vault after the owner confirms each transaction; deployment addresses, code hashes and explorer links will be published when that work is complete.
+Verification covers the local sandbox (7/7), read-only mainnet scoring and a live testnet deployment with an attack run (5/7: the two failures are missing NearBlocks data, see [Live on testnet](#live-on-testnet)).
 
 ## Try it in 2 minutes
 
@@ -129,6 +129,32 @@ Needs Node 22.22.2 or later (`engines` in `package.json`; the `near-sandbox` npm
 9. Stop the sandbox with Ctrl-C in its shell → `Stopping the sandbox...`.
 
 The MCP server refuses to start if the owner key is in its environment: `COUNTERSIGN_OWNER_KEY=x pnpm --silent --filter @countersign/mcp start --env-file .env.sandbox` → `error: COUNTERSIGN_OWNER_KEY is present in this process's environment (or in the env file). The MCP server is the agent and must never hold the owner key. ...`, exit 1.
+
+## Live on testnet
+
+Deployed on 2026-11-04 (record: [`deployments/testnet.json`](deployments/testnet.json)):
+
+| | Account | Code hash |
+|---|---|---|
+| Registry | [`registry.countersign-demo.testnet`](https://testnet.nearblocks.io/address/registry.countersign-demo.testnet) | `BHF1TWJ2t6Xq1S3Q71HDzfY7BFRrhu1wGGY6vkbTT28x` |
+| Vault | [`vault.countersign-demo.testnet`](https://testnet.nearblocks.io/address/vault.countersign-demo.testnet) | `9AuWzRywSxW9fjUZZ2AmjEW6D48kLmeFi3i6ovdDKwvJ` |
+| Owner | [`countersign-demo.testnet`](https://testnet.nearblocks.io/address/countersign-demo.testnet) | - |
+
+The code hashes equal the SHA-256 (base58) of `contracts/res/*.wasm`. The registry has no access keys ([key deletion](https://testnet.nearblocks.io/txns/HjTtXsHuoz8V3ExnMiBHzWGaVyrAwWFX1Zyj57uwCe7K)), so nobody can upgrade it. The vault has exactly one key: a function-call key with receiver = the vault, methods `pay`, `request_approval`, `report`, allowance 1 NEAR.
+
+`scripts/testnet-scenarios.sh <owner>` creates the scenario accounts under the owner (`acme-corp`, `acme-c0rp`, `fresh-invoice`, `reported`, `unknown-payee`, 3 reporters), files the 3 reports and trusts `acme-corp`. `pnpm attacks --network testnet` (needs `COUNTERSIGN_ATTACK_ROOT` in `.env`) then gave **5/7 PASS**:
+
+| # | expected | actual on testnet | |
+|---|---|---|---|
+| A1 | block (lookalike) | block (lookalike +45, score 90) → refused | PASS |
+| A2 | warn → Pending | warn (age +30, score 45) → pending | PASS |
+| A3 | block (registry) | warn (registry +10 from 3 reports, score 55) → pending | FAIL |
+| A4 | Pending(registry_flagged), not paid | Pending(registry_flagged), not paid ([tx](https://testnet.nearblocks.io/txns/DxGKo9o7bJDBSMYUkExjcMsPYX4YNmVVE1YcLFAmGiAB)) | PASS |
+| A5 | 50 paid (5 NEAR), then over daily cap | 50 paid (5 NEAR), 10 rejected (over daily cap) ([tx](https://testnet.nearblocks.io/txns/7G9GBbrBgpzuxbjL8yEKzow4eg2m8C7sc5hGeBpicQxf)) | PASS |
+| A6 | all rejected by the protocol | RequiresFullAccess, MethodNameMismatch, DepositWithFunctionCall, MethodNameMismatch | PASS |
+| A7 | allow → Paid | warn (score 30) → pending | FAIL |
+
+Both failures come from missing data, not from a wrong decision. NearBlocks' testnet API had not indexed the scenario accounts hours after they were created, and then answered HTTP 429 to every request. Without age and activity data, the SDK can't weigh the reporters (A3: 3 reports count +10 instead of +75) and adds unknown points to the trusted payee (A7: score 30, the warn threshold). Unknown data never lowers a verdict below `warn` ([Limits](#limits)), so both payments went to Pending for the owner instead of being paid or refused. The checks the vault enforces on-chain (A4, A5, A6) need no indexer and passed.
 
 ## How NEAR is used
 
@@ -265,7 +291,7 @@ Full list: [docs/limits.md](docs/limits.md). In short:
 - **What the key can't do:** transfer directly, call any vault method other than `pay` / `request_approval` / `report`, attach a deposit, or manage keys. When its 1 NEAR gas allowance runs out, the agent's transactions are rejected before the contract runs and nothing moves; the vault then has to be replaced (its full-access key was deleted).
 - **The registry has no on-chain sybil resistance.** Any 2 accounts can send payments to a payee into Pending. Reporter credibility is weighed off-chain only.
 - **Sandbox mode uses fixture data** (`fixtures/sandbox.json`) for account age, activity and deploys; registry reports are read from the sandbox registry.
-- **NEAR only** in v1 (no fungible tokens). **Mainnet is read-only**: `check` works, nothing is signed. Public-network registry reporting is intended for testnet; no mainnet registry is configured and no public testnet deployment is verified here yet.
+- **NEAR only** in v1 (no fungible tokens). **Mainnet is read-only**: `check` works, nothing is signed. Public-network registry reporting is intended for testnet ([deployed](#live-on-testnet)); no mainnet registry is configured.
 - **Splitting under the caps works**: an agent can pay an unknown account 0.1 NEAR at a time until the 5 NEAR daily cap (A5).
 
 ## Security

@@ -1,0 +1,17 @@
+{
+  "network": "testnet",
+  "ownerId": "countersign-demo.testnet",
+  "registryId": "registry.countersign-demo.testnet",
+  "vaultId": "vault.countersign-demo.testnet",
+  "deployedAt": "2026-11-04",
+  "codeHashes": {
+    "registry": "BHF1TWJ2t6Xq1S3Q71HDzfY7BFRrhu1wGGY6vkbTT28x",
+    "vault": "9AuWzRywSxW9fjUZZ2AmjEW6D48kLmeFi3i6ovdDKwvJ"
+  },
+  "transactions": {
+    "registryDeploy": "8X4ozPB63FqjsjVnaLtrDxdekEujFV6qdkoGKa7Y8e2Z",
+    "registryKeyDeleted": "HjTtXsHuoz8V3ExnMiBHzWGaVyrAwWFX1Zyj57uwCe7K",
+    "attackA4": "DxGKo9o7bJDBSMYUkExjcMsPYX4YNmVVE1YcLFAmGiAB",
+    "attackA5": "7G9GBbrBgpzuxbjL8yEKzow4eg2m8C7sc5hGeBpicQxf"
+  }
+}
