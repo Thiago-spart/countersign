@@ -156,6 +156,15 @@ The code hashes equal the SHA-256 (base58) of `contracts/res/*.wasm`. The regist
 
 Both failures come from missing data, not from a wrong decision. NearBlocks' testnet API had not indexed the scenario accounts hours after they were created, and then answered HTTP 429 to every request. Without age and activity data, the SDK can't weigh the reporters (A3: 3 reports count +10 instead of +75) and adds unknown points to the trusted payee (A7: score 30, the warn threshold). Unknown data never lowers a verdict below `warn` ([Limits](#limits)), so both payments went to Pending for the owner instead of being paid or refused. The checks the vault enforces on-chain (A4, A5, A6) need no indexer and passed.
 
+**Wallet-MCP bypass check.** With only the vault's agent key in near-mcp's keystore (`~/.near-keystore/testnet/`), Claude called near-mcp `tokens_send_near` from `vault.countersign-demo.testnet` on testnet. Both attempts were rejected before anything moved; the vault and receiver balances were unchanged:
+
+| Amount | Rejected with |
+|---|---|
+| 1 NEAR | `Access Key {account_id}:{public_key} does not have enough balance 0.9591771640516161 for transaction costing 1.000245500818749983222784`: the agent key's 1 NEAR gas allowance is checked first and is smaller than the transfer |
+| 0.1 NEAR | `The transaction contains more then one action, but it was signed with an access key which allows transaction to apply only one specific action. To apply more then one actions TX must be signed with a full access key`: near-js's text for the protocol error `RequiresFullAccess`, the same error A6 gets. A function-call key can't sign a `Transfer` |
+
+A wallet MCP holding only the agent key can't move vault funds. It can still call `pay`, which goes through the vault's limits. A wallet MCP holding an owner or full-access key bypasses Countersign ([Limits](#limits)).
+
 ## How NEAR is used
 
 - **Function-call access key as the agent's only key.** The key lives on the vault account with receiver = the vault, methods = `pay`, `request_approval`, `report`, allowance 1 NEAR. The protocol, not Countersign, refuses everything else: a direct transfer fails with `RequiresFullAccess`, other methods with `MethodNameMismatch`, any attached deposit with `DepositWithFunctionCall` (attack A6).
